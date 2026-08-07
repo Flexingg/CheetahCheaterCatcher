@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Night VAR</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { background-color: #121212; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        .player-container { position: relative; width: 100%; max-width: 1000px; aspect-ratio: 16/9; background: #000; border-radius: 8px; border: 2px solid #333; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; z-index: 10; pointer-events: none; }
+        
+        .controls-panel { width: 100%; max-width: 1000px; margin-top: 15px; display: flex; flex-direction: column; gap: 15px; }
+        .button-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
+        
+        button { padding: 12px 18px; font-size: 15px; border-radius: 6px; border: none; cursor: pointer; background-color: #2c2c2e; color: white; font-weight: 600; }
+        button:hover { background-color: #3a3a3c; }
+        button.danger { background-color: #dc3545; }
+        button.gold { background-color: #ffc107; color: #000; }
+        
+        .slider-container { display: flex; align-items: center; gap: 15px; background: #2c2c2e; padding: 10px 20px; border-radius: 6px; flex-grow: 1; max-width: 400px; margin: 0 auto; }
+        input[type="range"] { flex-grow: 1; cursor: pointer; }
+        .speed-badge { color: #ffc107; font-weight: bold; min-width: 130px; text-align: right; }
+
+        /* Scoreboard & Trophy Room Styles */
+        .app-panel { width: 100%; max-width: 1000px; margin-top: 30px; background: #1c1c1e; padding: 20px; border-radius: 8px; box-sizing: border-box; }
+        .score-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .score-table th, .score-table td { border: 1px solid #333; padding: 10px; text-align: center; }
+        .score-table th { background: #2c2c2e; }
+        .score-input { width: 60px; padding: 5px; background: #121212; border: 1px solid #444; color: white; text-align: center; border-radius: 4px; }
+        .total-row { font-weight: bold; background: #2c2c2e; }
+        .winner-cell { color: #28a745; font-size: 1.1em; }
+        .setup-form { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+        .setup-form input, .setup-form select { padding: 10px; background: #121212; border: 1px solid #444; color: white; border-radius: 4px; }
+        
+        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #2c2c2e; margin-bottom: 8px; border-radius: 4px; }
+        .history-item span.players { font-size: 0.85em; color: #aaa; margin-left: 10px; }
+        
+        .trophy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
+        .trophy-card { background: #2c2c2e; padding: 15px; border-radius: 8px; text-align: center; border-top: 4px solid #ffc107; }
+        .trophy-icon { font-size: 2em; margin-bottom: 10px; }
+        .trophy-value { font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #007aff; }
+        .trophy-title { font-size: 0.9em; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+    </style>
+</head>
+<body>
+
+    <div class="player-container">
+        <video id="video-player" controls autoplay muted></video>
+        <canvas id="telestrator"></canvas>
+    </div>
+
+    <div class="controls-panel">
+        <div class="button-group">
+            <button id="btn-draw" class="danger">✏️ Telestrator: OFF</button>
+            <button id="btn-clear">🧹 Clear Markup</button>
+            <button class="gold" onclick="openTrophyRoom()">🏆 Trophy Room</button>
+        </div>
+        
+        <div class="slider-container">
+            <span>🐌</span>
+            <input type="range" id="speed-slider" min="0.2" max="5.0" step="0.1" value="1.0">
+            <span>⏩</span>
+            <div id="speed-display" class="speed-badge">Speed: 1.0x</div>
+        </div>
+    </div>
+
+    <!-- Scoreboard Section -->
+    <div class="app-panel">
+        <h3>📊 Scoreboard</h3>
+        
+        <div id="game-setup" class="setup-form">
+            <input type="text" id="new-game-name" placeholder="Game Name (e.g. Hearts)">
+            <input type="text" id="new-players" placeholder="Players (comma separated)">
+            <select id="win-condition">
+                <option value="lowest">Lowest Score Wins</option>
+                <option value="highest">Highest Score Wins</option>
+            </select>
+            <button style="background-color: #007aff;" onclick="startNewGame()">Start New Game</button>
+            <button onclick="loadHistory()">View History</button>
+        </div>
+
+        <!-- Live Board -->
+        <div id="board-ui" style="display: none; overflow-x: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h4 id="current-game-title"></h4>
+                <span id="win-rule-badge" style="font-size: 0.8em; color: #aaa;"></span>
+            </div>
+            <table class="score-table" id="score-table"></table>
+            <button style="background-color: #007aff; margin-top: 15px;" onclick="addRound()">+ Add Round</button>
+        </div>
+        
+        <!-- History -->
+        <div id="history-ui" style="display: none;">
+            <div id="history-list"></div>
+            <button style="margin-top: 15px;" onclick="closePanels()">Close History</button>
+        </div>
+
+        <!-- Trophy Room -->
+        <div id="trophy-ui" style="display: none;">
+            <div class="trophy-grid" id="trophy-grid"></div>
+            <button style="margin-top: 15px;" onclick="closePanels()">Close Trophy Room</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Video & Telestrator Logic ---
+        const video = document.getElementById('video-player');
+        const canvas = document.getElementById('telestrator');
+        const ctx = canvas.getContext('2d');
+        const drawBtn = document.getElementById('btn-draw');
+        const speedSlider = document.getElementById('speed-slider');
+        const speedDisplay = document.getElementById('speed-display');
+
+        if (Hls.isSupported()) {
+            const hls = new Hls({ liveDurationInfinity: true, liveBackBufferLength: 300 });
+            setTimeout(() => { hls.loadSource('/buffer/stream.m3u8'); hls.attachMedia(video); }, 3000);
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = '/buffer/stream.m3u8';
+        }
+
+        let isDrawing = false;
+        let drawingEnabled = false;
+
+        function resizeCanvas() {
+            if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
+                canvas.width = video.clientWidth; canvas.height = video.clientHeight;
+                ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.strokeStyle = '#FFD700';
+                ctx.shadowBlur = 4; ctx.shadowColor = '#000';
+            }
+        }
+        const resizeObserver = new ResizeObserver(resizeCanvas);
+        resizeObserver.observe(video);
+
+        function getCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return { x: clientX - rect.left, y: clientY - rect.top };
+        }
+
+        canvas.addEventListener('mousedown', (e) => { isDrawing = true; ctx.beginPath(); ctx.moveTo(getCoords(e).x, getCoords(e).y); });
+        canvas.addEventListener('mousemove', (e) => { if (isDrawing) { ctx.lineTo(getCoords(e).x, getCoords(e).y); ctx.stroke(); } });
+        canvas.addEventListener('mouseup', () => isDrawing = false);
+        canvas.addEventListener('mouseout', () => isDrawing = false);
+
+        drawBtn.addEventListener('click', () => {
+            drawingEnabled = !drawingEnabled;
+            canvas.style.pointerEvents = drawingEnabled ? 'auto' : 'none';
+            drawBtn.innerText = drawingEnabled ? '✏️ Telestrator: ON' : '✏️ Telestrator: OFF';
+        });
+
+        document.getElementById('btn-clear').addEventListener('click', () => ctx.clearRect(0, 0, canvas.width, canvas.height));
+
+        speedSlider.addEventListener('input', (e) => {
+            const speed = parseFloat(e.target.value).toFixed(1);
+            video.playbackRate = speed; speedDisplay.innerText = `Speed: ${speed}x`;
+        });
+        speedSlider.addEventListener('dblclick', () => {
+            speedSlider.value = 1.0; video.playbackRate = 1.0; speedDisplay.innerText = `Speed: 1.0x`;
+        });
+
+        // --- Scoreboard & API Logic ---
+        let currentGameId = null;
+        let currentPlayers = [];
+        let currentScores = [];
+        let numRounds = 1;
+        let winCondition = 'lowest';
+
+        function closePanels() {
+            document.getElementById('history-ui').style.display = 'none';
+            document.getElementById('trophy-ui').style.display = 'none';
+            if (currentGameId) document.getElementById('board-ui').style.display = 'block';
+        }
+
+        async function startNewGame() {
+            const name = document.getElementById('new-game-name').value || "Quick Game";
+            const playersStr = document.getElementById('new-players').value;
+            const winCond = document.getElementById('win-condition').value;
+            if (!playersStr) return alert("Enter at least one player");
+            
+            const players = playersStr.split(',').map(p => p.trim());
+            const res = await fetch('/api/games/new', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, players, win_condition: winCond })
+            });
+            const data = await res.json();
+            loadGame(data.game_id);
+        }
+
+        async function loadGame(gameId) {
+            currentGameId = gameId;
+            const res = await fetch(`/api/games/${gameId}`);
+            const data = await res.json();
+            
+            currentPlayers = data.players;
+            currentScores = data.scores;
+            winCondition = data.game.win_condition || 'lowest';
+            
+            document.getElementById('current-game-title').innerText = data.game.name;
+            document.getElementById('win-rule-badge').innerText = `(${winCondition === 'lowest' ? 'Lowest' : 'Highest'} Score Wins)`;
+            
+            numRounds = Math.max(1, ...currentScores.map(s => s.round));
+            
+            document.getElementById('board-ui').style.display = 'block';
+            document.getElementById('history-ui').style.display = 'none';
+            document.getElementById('trophy-ui').style.display = 'none';
+            renderTable();
+        }
+
+        function renderTable() {
+            const table = document.getElementById('score-table');
+            let html = `<tr><th>Round</th>`;
+            currentPlayers.forEach(p => { html += `<th>${p.name}</th>`; });
+            html += `</tr>`;
+            
+            let totals = {};
+            currentPlayers.forEach(p => totals[p.id] = 0);
+
+            for (let r = 1; r <= numRounds; r++) {
+                html += `<tr><td>
+                    ${r} <span style="cursor:pointer; font-size:12px; margin-left:5px;" onclick="removeRound(${r})" title="Delete Round">🗑️</span>
+                </td>`;
+                currentPlayers.forEach(p => {
+                    const scoreObj = currentScores.find(s => s.player_id === p.id && s.round === r);
+                    const val = scoreObj ? scoreObj.score : '';
+                    if (val !== '') totals[p.id] += parseInt(val);
+                    html += `<td><input type="number" class="score-input" value="${val}" onchange="saveScore(${p.id}, ${r}, this.value)"></td>`;
+                });
+                html += `</tr>`;
+            }
+            
+            html += `<tr class="total-row"><td>TOTAL</td>`;
+            const validTotals = Object.values(totals);
+            const targetScore = winCondition === 'lowest' ? Math.min(...validTotals) : Math.max(...validTotals);
+            
+            currentPlayers.forEach(p => {
+                const isWinner = totals[p.id] === targetScore && (winCondition === 'lowest' ? targetScore >= 0 : targetScore > 0) ? "winner-cell" : "";
+                html += `<td class="${isWinner}">🏆 ${totals[p.id]}</td>`;
+            });
+            html += `</tr>`;
+            
+            table.innerHTML = html;
+        }
+
+        async function saveScore(playerId, round, val) {
+            const score = parseInt(val) || 0;
+            const existing = currentScores.find(s => s.player_id === playerId && s.round === round);
+            if (existing) { existing.score = score; } 
+            else { currentScores.push({ player_id: playerId, round: round, score: score }); }
+            renderTable();
+            await fetch('/api/games/score', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ player_id: playerId, round: round, score: score })
+            });
+        }
+
+        function addRound() { numRounds++; renderTable(); }
+
+        async function removeRound(r) {
+            if (!confirm(`Are you sure you want to delete Round ${r}?`)) return;
+            await fetch(`/api/games/${currentGameId}/round/${r}`, { method: 'DELETE' });
+            loadGame(currentGameId); // Reload to pull shifted rounds
+        }
+
+        async function loadHistory() {
+            const res = await fetch('/api/games');
+            const data = await res.json();
+            const list = document.getElementById('history-list');
+            list.innerHTML = data.games.map(g => 
+                `<div class="history-item">
+                    <div>
+                        <a href="#" onclick="loadGame(${g.id})" style="color: #007aff; text-decoration: none; font-weight: bold;">
+                            ${g.display_name} (${g.date.split(' ')[0]})
+                        </a>
+                        <span class="players">👥 ${g.players.join(', ')}</span>
+                    </div>
+                    <span style="cursor:pointer" onclick="removeGame(${g.id})" title="Delete Game">🗑️</span>
+                </div>`
+            ).join('');
+            document.getElementById('history-ui').style.display = 'block';
+            document.getElementById('board-ui').style.display = 'none';
+            document.getElementById('trophy-ui').style.display = 'none';
+        }
+
+        async function removeGame(id) {
+            if (!confirm("Are you sure you want to permanently delete this game?")) return;
+            await fetch(`/api/games/${id}`, { method: 'DELETE' });
+            if (currentGameId === id) { currentGameId = null; document.getElementById('board-ui').style.display = 'none'; }
+            loadHistory();
+        }
+
+        // --- Trophy Room Logic ---
+        async function openTrophyRoom() {
+            const res = await fetch('/api/stats');
+            const stats = await res.json();
+            const grid = document.getElementById('trophy-grid');
+            
+            let html = '';
+            
+            if (stats.most_games.length > 0) {
+                html += `<div class="trophy-card">
+                            <div class="trophy-icon">🕹️</div>
+                            <div class="trophy-title">Tabletop Veteran (Most Games)</div>
+                            <div class="trophy-value">${stats.most_games[0].name}</div>
+                            <div style="font-size:0.8em;color:#aaa;">${stats.most_games[0].count} games played</div>
+                         </div>`;
+            }
+            if (stats.highest_round) {
+                html += `<div class="trophy-card">
+                            <div class="trophy-icon">💣</div>
+                            <div class="trophy-title">The Nuke (Highest Single Round)</div>
+                            <div class="trophy-value">${stats.highest_round.name}</div>
+                            <div style="font-size:0.8em;color:#aaa;">${stats.highest_round.score} pts in ${stats.highest_round.game_name}</div>
+                         </div>`;
+            }
+            if (stats.lowest_round) {
+                html += `<div class="trophy-card">
+                            <div class="trophy-icon">🧘</div>
+                            <div class="trophy-title">Zen Master (Lowest Single Round)</div>
+                            <div class="trophy-value">${stats.lowest_round.name}</div>
+                            <div style="font-size:0.8em;color:#aaa;">${stats.lowest_round.score} pts in ${stats.lowest_round.game_name}</div>
+                         </div>`;
+            }
+            if (stats.most_zeros) {
+                html += `<div class="trophy-card">
+                            <div class="trophy-icon">🍩</div>
+                            <div class="trophy-title">The Donut (Most Flawless Rounds)</div>
+                            <div class="trophy-value">${stats.most_zeros.name}</div>
+                            <div style="font-size:0.8em;color:#aaa;">${stats.most_zeros.count} rounds scoring 0</div>
+                         </div>`;
+            }
+            if (stats.best_avg.length > 0) {
+                html += `<div class="trophy-card">
+                            <div class="trophy-icon">🎯</div>
+                            <div class="trophy-title">Mr. Consistent (Best Average)</div>
+                            <div class="trophy-value">${stats.best_avg[0].name}</div>
+                            <div style="font-size:0.8em;color:#aaa;">${stats.best_avg[0].avg_score} pts/round average</div>
+                         </div>`;
+            }
+            
+            grid.innerHTML = html || "<p style='text-align:center; width:100%; color:#aaa;'>Play some games to earn trophies!</p>";
+            document.getElementById('trophy-ui').style.display = 'block';
+            document.getElementById('history-ui').style.display = 'none';
+            document.getElementById('board-ui').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

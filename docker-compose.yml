@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  gamenight-replay:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.10-slim
+        RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+        WORKDIR /app
+        RUN pip install fastapi uvicorn requests jinja2 python-multipart aiofiles
+        COPY . .
+        EXPOSE 8000
+        CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    container_name: gamenight-replay
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - CAMERA_URL=http://192.168.1.139:8080/video 
+    volumes:
+      - ./replay_data:/app/buffer
