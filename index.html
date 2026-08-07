@@ -9,7 +9,7 @@
         body { background-color: #121212; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
         .player-container { position: relative; width: 100%; max-width: 1000px; aspect-ratio: 16/9; background: #000; border-radius: 8px; border: 2px solid #333; }
         video { width: 100%; height: 100%; object-fit: contain; }
-        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; z-index: 10; pointer-events: none; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; z-index: 10; pointer-events: none; touch-action: none; }}
         
         .controls-panel { width: 100%; max-width: 1000px; margin-top: 15px; display: flex; flex-direction: column; gap: 15px; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
@@ -42,6 +42,36 @@
         .trophy-icon { font-size: 2em; margin-bottom: 10px; }
         .trophy-value { font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #007aff; }
         .trophy-title { font-size: 0.9em; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+
+        video::-webkit-media-controls-fullscreen-button {
+            display: none;
+        }
+
+        .player-container:fullscreen {
+            max-width: none;
+            width: 100vw;
+            height: 100vh;
+            border: none;
+            border-radius: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #000;
+        }
+        
+        .player-container:-webkit-full-screen {
+            max-width: none;
+            width: 100vw;
+            height: 100vh;
+            border: none;
+            border-radius: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #000;
+        }
+
+        
     </style>
 </head>
 <body>
@@ -55,6 +85,7 @@
         <div class="button-group">
             <button id="btn-draw" class="danger">✏️ Telestrator: OFF</button>
             <button id="btn-clear">🧹 Clear Markup</button>
+            <button id="btn-fullscreen" class="primary">📺 Fullscreen</button>
             <button class="gold" onclick="openTrophyRoom()">🏆 Trophy Room</button>
         </div>
         
@@ -64,6 +95,7 @@
             <span>⏩</span>
             <div id="speed-display" class="speed-badge">Speed: 1.0x</div>
         </div>
+
     </div>
 
     <!-- Scoreboard Section -->
@@ -102,7 +134,10 @@
             <div class="trophy-grid" id="trophy-grid"></div>
             <button style="margin-top: 15px;" onclick="closePanels()">Close Trophy Room</button>
         </div>
+
+        
     </div>
+
 
     <script>
         // --- Video & Telestrator Logic ---
@@ -112,6 +147,33 @@
         const drawBtn = document.getElementById('btn-draw');
         const speedSlider = document.getElementById('speed-slider');
         const speedDisplay = document.getElementById('speed-display');
+        const fullscreenBtn = document.getElementById('btn-fullscreen');
+        const playerContainer = document.querySelector('.player-container');
+
+        fullscreenBtn.addEventListener('click', () => {
+            if (!document.fullscreenElement) {
+                // Enter fullscreen on the container, not just the video
+                if (playerContainer.requestFullscreen) {
+                    playerContainer.requestFullscreen();
+                } else if (playerContainer.webkitRequestFullscreen) { /* Safari/iOS */
+                    playerContainer.webkitRequestFullscreen();
+                }
+            } else {
+                // Exit fullscreen
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        });
+
+        // Optional: Update button text depending on fullscreen state
+        document.addEventListener('fullscreenchange', () => {
+            if (document.fullscreenElement) {
+                fullscreenBtn.innerText = '↙️ Exit Fullscreen';
+            } else {
+                fullscreenBtn.innerText = '📺 Fullscreen';
+            }
+        });
 
         if (Hls.isSupported()) {
             const hls = new Hls({ liveDurationInfinity: true, liveBackBufferLength: 300 });
@@ -140,10 +202,38 @@
             return { x: clientX - rect.left, y: clientY - rect.top };
         }
 
-        canvas.addEventListener('mousedown', (e) => { isDrawing = true; ctx.beginPath(); ctx.moveTo(getCoords(e).x, getCoords(e).y); });
-        canvas.addEventListener('mousemove', (e) => { if (isDrawing) { ctx.lineTo(getCoords(e).x, getCoords(e).y); ctx.stroke(); } });
+        // Mouse Events
+        canvas.addEventListener('mousedown', (e) => { 
+            isDrawing = true; 
+            ctx.beginPath(); 
+            ctx.moveTo(getCoords(e).x, getCoords(e).y); 
+        });
+        canvas.addEventListener('mousemove', (e) => { 
+            if (isDrawing) { 
+                ctx.lineTo(getCoords(e).x, getCoords(e).y); 
+                ctx.stroke(); 
+            } 
+        });
         canvas.addEventListener('mouseup', () => isDrawing = false);
         canvas.addEventListener('mouseout', () => isDrawing = false);
+
+        // Touch Events (Android/iOS)
+        canvas.addEventListener('touchstart', (e) => { 
+            if (drawingEnabled) e.preventDefault(); // Stops pull-to-refresh
+            isDrawing = true; 
+            ctx.beginPath(); 
+            ctx.moveTo(getCoords(e).x, getCoords(e).y); 
+        }, { passive: false });
+        
+        canvas.addEventListener('touchmove', (e) => { 
+            if (drawingEnabled) e.preventDefault(); // Stops scrolling
+            if (isDrawing) { 
+                ctx.lineTo(getCoords(e).x, getCoords(e).y); 
+                ctx.stroke(); 
+            } 
+        }, { passive: false });
+        
+        canvas.addEventListener('touchend', () => isDrawing = false);
 
         drawBtn.addEventListener('click', () => {
             drawingEnabled = !drawingEnabled;
