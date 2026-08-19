@@ -3,13 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
     <title>Game Night VAR</title>
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <!-- hls.js removed: live view now uses WebSocket MJPEG -> <canvas> -->
     <style>
         body { background-color: #121212; color: #fff; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; }
         .player-container { position: relative; width: 100%; max-width: 1000px; aspect-ratio: 16/9; background: #000; border-radius: 8px; border: 2px solid #333; }
         video { width: 100%; height: 100%; object-fit: contain; }
-        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; z-index: 10; pointer-events: none; touch-action: none; }}
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; cursor: crosshair; z-index: 10; pointer-events: none; touch-action: none; }
         
         .controls-panel { width: 100%; max-width: 1000px; margin-top: 15px; display: flex; flex-direction: column; gap: 15px; }
         .button-group { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
@@ -22,7 +23,7 @@
         .slider-container { display: flex; align-items: center; gap: 15px; background: #2c2c2e; padding: 10px 20px; border-radius: 6px; flex-grow: 1; max-width: 400px; margin: 0 auto; }
         input[type="range"] { flex-grow: 1; cursor: pointer; }
         .speed-badge { color: #ffc107; font-weight: bold; min-width: 130px; text-align: right; }
-
+        
         /* Scoreboard & Trophy Room Styles */
         .app-panel { width: 100%; max-width: 1000px; margin-top: 30px; background: #1c1c1e; padding: 20px; border-radius: 8px; box-sizing: border-box; }
         .score-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
@@ -34,19 +35,19 @@
         .setup-form { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
         .setup-form input, .setup-form select { padding: 10px; background: #121212; border: 1px solid #444; color: white; border-radius: 4px; }
         
-        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #2c2c2e; margin-bottom: 8px; border-radius: 4px; }
-        .history-item span.players { font-size: 0.85em; color: #aaa; margin-left: 10px; }
+        .history-item { display: flex; justify-content: space-between; align-items: center; padding: 10x; background: #2c2c2e; margin-bottom: 8x; border-radius: 4px; }
+        .history-item span.players { font-size: 0.85em; color: #aaa; margin-left: 10x; }
         
         .trophy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
         .trophy-card { background: #2c2c2e; padding: 15px; border-radius: 8px; text-align: center; border-top: 4px solid #ffc107; }
         .trophy-icon { font-size: 2em; margin-bottom: 10px; }
         .trophy-value { font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #007aff; }
         .trophy-title { font-size: 0.9em; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
-
+        
         video::-webkit-media-controls-fullscreen-button {
             display: none;
         }
-
+        
         .player-container:fullscreen {
             max-width: none;
             width: 100vw;
@@ -70,373 +71,456 @@
             justify-content: center;
             background-color: #000;
         }
-
         
-    </style>
+        /* Replay & Export Panel */
+        .replay-panel { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 12px; }
+        .replay-scrubber { display: flex; align-items: center; gap: 12x; background: #2c2c2e; padding: 12px 16px; border-radius: 6px; flex-wrap: wrap; }
+        .replay-scrubber input[type="range"] { flex-grow: 1; min-width: 120px; cursor: pointer; }
+        .scrub-label { color: #ffc107; font-weight: bold; white-space: nowrap; }
+        .export-status { background: #2c2c2e; padding: 12x; border-radius: 6x; text-align: center; }
+        .export-status a { color: #ffc107; font-weight: bold; }
+        .trophy-room-btn { padding: 14px 28px; font-size: 17px; }
+
+        /* Rounded corners: keep the replay <video> clipped inside the player box */
+        .player-container { overflow: hidden; }
+
+        /* Instant replay review */
+        #replay-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; background: #000; z-index: 5; display: none; }
+        #replay-panel { display: none; width: 100%; max-width: 1000px; flex-direction: column; gap: 12px; }
+        #replay-status { color: #aaa; font-size: 0.85em; }
+        #btn-instant-replay { background-color: #e74c3c; }
+        #btn-back-live { background-color: #dc3545; }
+</style>
 </head>
 <body>
-
     <div class="player-container">
-        <video id="video-player" controls autoplay muted></video>
+        <canvas id="live-canvas"></canvas>
+        <video id="replay-video" preload="auto" playsinline></video>
         <canvas id="telestrator"></canvas>
+        <div id="live-status" style="position:absolute;top:8px;left:10px;font-size:13px;color:#8f8;text-shadow:0 0 4px #000;z-index:20;pointer-events:none;"></div>
     </div>
 
     <div class="controls-panel">
         <div class="button-group">
             <button id="btn-draw" class="danger">✏️ Telestrator: OFF</button>
             <button id="btn-clear">🧹 Clear Markup</button>
+            <button id="btn-instant-replay">📼 Instant Replay</button>
             <button id="btn-fullscreen" class="primary">📺 Fullscreen</button>
-            <button class="gold" onclick="openTrophyRoom()">🏆 Trophy Room</button>
-        </div>
-        
-        <div class="slider-container">
-            <span>🐌</span>
-            <input type="range" id="speed-slider" min="0.2" max="5.0" step="0.1" value="1.0">
-            <span>⏩</span>
-            <div id="speed-display" class="speed-badge">Speed: 1.0x</div>
         </div>
 
-    </div>
-
-    <!-- Scoreboard Section -->
-    <div class="app-panel">
-        <h3>📊 Scoreboard</h3>
-        
-        <div id="game-setup" class="setup-form">
-            <input type="text" id="new-game-name" placeholder="Game Name (e.g. Hearts)">
-            <input type="text" id="new-players" placeholder="Players (comma separated)">
-            <select id="win-condition">
-                <option value="lowest">Lowest Score Wins</option>
-                <option value="highest">Highest Score Wins</option>
-            </select>
-            <button style="background-color: #007aff;" onclick="startNewGame()">Start New Game</button>
-            <button onclick="loadHistory()">View History</button>
-        </div>
-
-        <!-- Live Board -->
-        <div id="board-ui" style="display: none; overflow-x: auto;">
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h4 id="current-game-title"></h4>
-                <span id="win-rule-badge" style="font-size: 0.8em; color: #aaa;"></span>
+        <div id="replay-panel" class="replay-panel">
+            <div class="replay-scrubber">
+                <span class="scrub-label" id="replay-speed-label">1 FPS</span>
+                <input type="range" id="replay-speed" min="0" max="100" step="1" value="0" disabled>
+                <span class="scrub-label" id="replay-time">0:00</span>
             </div>
-            <table class="score-table" id="score-table"></table>
-            <button style="background-color: #007aff; margin-top: 15px;" onclick="addRound()">+ Add Round</button>
-        </div>
-        
-        <!-- History -->
-        <div id="history-ui" style="display: none;">
-            <div id="history-list"></div>
-            <button style="margin-top: 15px;" onclick="closePanels()">Close History</button>
-        </div>
-
-        <!-- Trophy Room -->
-        <div id="trophy-ui" style="display: none;">
-            <div class="trophy-grid" id="trophy-grid"></div>
-            <button style="margin-top: 15px;" onclick="closePanels()">Close Trophy Room</button>
+            <div class="button-group">
+                <button id="btn-replay-move">&lt;&lt;</button>
+                <button id="btn-replay-play" class="primary">⏸ Pause</button>
+                <button id="btn-replay-move2">&gt;&gt;</button>
+                <button id="btn-back-live">🔴 Back to Live</button>
+                <span id="replay-status"></span>
+            </div>
         </div>
 
-        
-    </div>
+        <div class="app-panel">
+            <h3>📊 Scoreboard</h3>
 
+            <!-- Scoreboard Setup Form -->
+            <div id="game-setup" class="setup-form">
+                <input type="text" id="new-game-name" placeholder="Game Name (e.g. Hearts)">
+                <input type="text" id="new-players" placeholder="Players (comma separated)">
+                <select id="win-condition">
+                    <option value="lowest">Lowest Score Wins</option>
+                    <option value="highest">Highest Score Wins</option>
+                </select>
+                <button onclick="startNewGame()">Start New Game</button>
+                <button onclick="loadHistory()">View History</button>
+            </div>
 
+            <!-- Live Board -->
+            <div id="board-ui" style="display: none; overflow-x: auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h4 id="current-game-title"></h4>
+                    <span id="win-rule-badge" style="font-size: 0.8em; color: #aaa;"></span>
+                </div>
+                <table class="score-table" id="score-table"></table>
+                <button style="background-color: #007aff;" onclick="addRound()">+ Add Round</button>
+            </div>
+
+            <!-- History -->
+            <div id="history-ui" style="display: none;">
+                <div id="history-list"></div>
+                <button onclick="closeHistory()">Close History</button>
+            </div>
+
+            <!-- Trophy Room -->
+            <div id="trophy-ui" style="display: none;">
+                <div class="trophy-grid" id="trophy-grid"></div>
+                <button onclick="closePanels()">Close Trophy Room</button>
+            </div>
+
+        </div>
+
+            </div>
     <script>
-        // --- Video & Telestrator Logic ---
-        const video = document.getElementById('video-player');
-        const canvas = document.getElementById('telestrator');
-        const ctx = canvas.getContext('2d');
-        const drawBtn = document.getElementById('btn-draw');
-        const speedSlider = document.getElementById('speed-slider');
-        const speedDisplay = document.getElementById('speed-display');
-        const fullscreenBtn = document.getElementById('btn-fullscreen');
-        const playerContainer = document.querySelector('.player-container');
+        // --- Live view: WebSocket MJPEG -> canvas (real-time, ~0.2s lag) ---
+        // The previous HLS path (2s segments + hls.js sitting ~6s behind the
+        // live edge + an ffmpeg MJPEG->H.264 re-transcode) produced the 10-20s
+        // delay. Now the server pushes each camera JPEG straight to us as a
+        // binary WebSocket message and we blit it to a <canvas> as it arrives.
+        document.addEventListener('DOMContentLoaded', function() {
+            const liveCanvas = document.getElementById('live-canvas');
+            const lctx = liveCanvas.getContext('2d');
+            const liveBox = document.querySelector('.player-container');
+            const liveStatus = document.getElementById('live-status');
+            let framesShown = 0;
+            let lastFrameMs = 0;
 
-        fullscreenBtn.addEventListener('click', () => {
-            if (!document.fullscreenElement) {
-                // Enter fullscreen on the container, not just the video
-                if (playerContainer.requestFullscreen) {
-                    playerContainer.requestFullscreen();
-                } else if (playerContainer.webkitRequestFullscreen) { /* Safari/iOS */
-                    playerContainer.webkitRequestFullscreen();
-                }
-            } else {
-                // Exit fullscreen
-                if (document.exitFullscreen) {
-                    document.exitFullscreen();
+            function sizeLiveCanvas() {
+                if (liveBox.clientWidth > 0) {
+                    liveCanvas.width = liveBox.clientWidth;
+                    liveCanvas.height = liveBox.clientHeight;
                 }
             }
-        });
-
-        // Optional: Update button text depending on fullscreen state
-        document.addEventListener('fullscreenchange', () => {
-            if (document.fullscreenElement) {
-                fullscreenBtn.innerText = '↙️ Exit Fullscreen';
+            sizeLiveCanvas();
+            if (window.ResizeObserver) {
+                new ResizeObserver(sizeLiveCanvas).observe(liveBox);
             } else {
-                fullscreenBtn.innerText = '📺 Fullscreen';
+                window.addEventListener('resize', sizeLiveCanvas);
             }
-        });
 
-        if (Hls.isSupported()) {
-            const hls = new Hls({ liveDurationInfinity: true, liveBackBufferLength: 300 });
-            setTimeout(() => { hls.loadSource('/buffer/stream.m3u8'); hls.attachMedia(video); }, 3000);
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = '/buffer/stream.m3u8';
-        }
-
-        let isDrawing = false;
-        let drawingEnabled = false;
-
-        function resizeCanvas() {
-            if (canvas.width !== video.clientWidth || canvas.height !== video.clientHeight) {
-                canvas.width = video.clientWidth; canvas.height = video.clientHeight;
-                ctx.lineWidth = 5; ctx.lineCap = 'round'; ctx.strokeStyle = '#FFD700';
-                ctx.shadowBlur = 4; ctx.shadowColor = '#000';
+            function drawFrame(src, sw, sh, onDone) {
+                sizeLiveCanvas();
+                const cw = liveCanvas.width, ch = liveCanvas.height;
+                const scale = Math.min(cw / sw, ch / sh);
+                const dw = sw * scale, dh = sh * scale;
+                lctx.clearRect(0, 0, cw, ch);
+                lctx.drawImage(src, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+                framesShown++;
+                const now = performance.now();
+                if (now - lastFrameMs > 999) {
+                    if (liveStatus) liveStatus.textContent = 'LIVE ' + framesShown + ' fps';
+                    framesShown = 0;
+                    lastFrameMs = now;
+                }
+                if (onDone) onDone();
             }
-        }
-        const resizeObserver = new ResizeObserver(resizeCanvas);
-        resizeObserver.observe(video);
 
-        function getCoords(e) {
-            const rect = canvas.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-            return { x: clientX - rect.left, y: clientY - rect.top };
-        }
+            function connectLive() {
+                const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+                const ws = new WebSocket(proto + '://' + location.host + '/ws/live');
+                ws.binaryType = 'blob';
 
-        // Mouse Events
-        canvas.addEventListener('mousedown', (e) => { 
-            isDrawing = true; 
-            ctx.beginPath(); 
-            ctx.moveTo(getCoords(e).x, getCoords(e).y); 
-        });
-        canvas.addEventListener('mousemove', (e) => { 
-            if (isDrawing) { 
-                ctx.lineTo(getCoords(e).x, getCoords(e).y); 
-                ctx.stroke(); 
-            } 
-        });
-        canvas.addEventListener('mouseup', () => isDrawing = false);
-        canvas.addEventListener('mouseout', () => isDrawing = false);
+                ws.onopen = function() {
+                    if (liveStatus) liveStatus.textContent = 'LIVE …';
+                };
+                ws.onmessage = function(ev) {
+                    const blob = ev.data;
+                    if (window.createImageBitmap) {
+                        createImageBitmap(blob).then(function(bmp) {
+                            drawFrame(bmp, bmp.width, bmp.height, function() { bmp.close(); });
+                        }).catch(function() {});
+                    } else {
+                        const url = URL.createObjectURL(blob);
+                        const img = new Image();
+                        img.onload = function() {
+                            drawFrame(img, img.naturalWidth, img.naturalHeight,
+                                      function() { URL.revokeObjectURL(url); });
+                        };
+                        img.src = url;
+                    }
+                };
+                ws.onclose = function() {
+                    if (liveStatus) liveStatus.textContent = 'RECONNECTING…';
+                    setTimeout(connectLive, 1500);
+                };
+                ws.onerror = function() { ws.close(); };
+            }
+            connectLive();
+                // --- Telestrator (drawing annotation) ---
+                const teleCanvas = document.getElementById('telestrator');
+                const ctx = teleCanvas.getContext('2d');
+                const playerContainer = document.querySelector('.player-container');
+                const btnDraw = document.getElementById('btn-draw');
+                const btnClear = document.getElementById('btn-clear');
+                const btnFullscreen = document.getElementById('btn-fullscreen');
 
-        // Touch Events (Android/iOS)
-        canvas.addEventListener('touchstart', (e) => { 
-            if (drawingEnabled) e.preventDefault(); // Stops pull-to-refresh
-            isDrawing = true; 
-            ctx.beginPath(); 
-            ctx.moveTo(getCoords(e).x, getCoords(e).y); 
-        }, { passive: false });
-        
-        canvas.addEventListener('touchmove', (e) => { 
-            if (drawingEnabled) e.preventDefault(); // Stops scrolling
-            if (isDrawing) { 
-                ctx.lineTo(getCoords(e).x, getCoords(e).y); 
-                ctx.stroke(); 
-            } 
-        }, { passive: false });
-        
-        canvas.addEventListener('touchend', () => isDrawing = false);
+                let isDrawing = false;
+                let drawingEnabled = false;
 
-        drawBtn.addEventListener('click', () => {
-            drawingEnabled = !drawingEnabled;
-            canvas.style.pointerEvents = drawingEnabled ? 'auto' : 'none';
-            drawBtn.innerText = drawingEnabled ? '✏️ Telestrator: ON' : '✏️ Telestrator: OFF';
-        });
+                // Size the canvas to match the rendered video so marks line up
+                function resizeCanvas() {
+                    if (liveCanvas.clientWidth > 0) {
+                        teleCanvas.width = liveCanvas.clientWidth;
+                        teleCanvas.height = liveCanvas.clientHeight;
+                    }
+                    ctx.lineWidth = 5;
+                    ctx.lineCap = 'round';
+                    ctx.lineJoin = 'round';
+                    ctx.strokeStyle = '#FFD700';
+                    ctx.shadowBlur = 4;
+                    ctx.shadowColor = '#000000';
+                }
+                resizeCanvas();
+                if (window.ResizeObserver) {
+                    new ResizeObserver(resizeCanvas).observe(playerContainer);
+                } else {
+                    window.addEventListener('resize', resizeCanvas);
+                }
 
-        document.getElementById('btn-clear').addEventListener('click', () => ctx.clearRect(0, 0, canvas.width, canvas.height));
+                // Keeps canvas transparent to clicks unless telestrator is armed,
+                // so the video controls remain usable the rest of the time.
+                teleCanvas.style.pointerEvents = 'none';
 
-        speedSlider.addEventListener('input', (e) => {
-            const speed = parseFloat(e.target.value).toFixed(1);
-            video.playbackRate = speed; speedDisplay.innerText = `Speed: ${speed}x`;
-        });
-        speedSlider.addEventListener('dblclick', () => {
-            speedSlider.value = 1.0; video.playbackRate = 1.0; speedDisplay.innerText = `Speed: 1.0x`;
-        });
+                function getCoords(e) {
+                    const rect = teleCanvas.getBoundingClientRect();
+                    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+                    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+                    return { x: cx - rect.left, y: cy - rect.top };
+                }
 
-        // --- Scoreboard & API Logic ---
-        let currentGameId = null;
-        let currentPlayers = [];
-        let currentScores = [];
-        let numRounds = 1;
-        let winCondition = 'lowest';
-
-        function closePanels() {
-            document.getElementById('history-ui').style.display = 'none';
-            document.getElementById('trophy-ui').style.display = 'none';
-            if (currentGameId) document.getElementById('board-ui').style.display = 'block';
-        }
-
-        async function startNewGame() {
-            const name = document.getElementById('new-game-name').value || "Quick Game";
-            const playersStr = document.getElementById('new-players').value;
-            const winCond = document.getElementById('win-condition').value;
-            if (!playersStr) return alert("Enter at least one player");
-            
-            const players = playersStr.split(',').map(p => p.trim());
-            const res = await fetch('/api/games/new', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, players, win_condition: winCond })
-            });
-            const data = await res.json();
-            loadGame(data.game_id);
-        }
-
-        async function loadGame(gameId) {
-            currentGameId = gameId;
-            const res = await fetch(`/api/games/${gameId}`);
-            const data = await res.json();
-            
-            currentPlayers = data.players;
-            currentScores = data.scores;
-            winCondition = data.game.win_condition || 'lowest';
-            
-            document.getElementById('current-game-title').innerText = data.game.name;
-            document.getElementById('win-rule-badge').innerText = `(${winCondition === 'lowest' ? 'Lowest' : 'Highest'} Score Wins)`;
-            
-            numRounds = Math.max(1, ...currentScores.map(s => s.round));
-            
-            document.getElementById('board-ui').style.display = 'block';
-            document.getElementById('history-ui').style.display = 'none';
-            document.getElementById('trophy-ui').style.display = 'none';
-            renderTable();
-        }
-
-        function renderTable() {
-            const table = document.getElementById('score-table');
-            let html = `<tr><th>Round</th>`;
-            currentPlayers.forEach(p => { html += `<th>${p.name}</th>`; });
-            html += `</tr>`;
-            
-            let totals = {};
-            currentPlayers.forEach(p => totals[p.id] = 0);
-
-            for (let r = 1; r <= numRounds; r++) {
-                html += `<tr><td>
-                    ${r} <span style="cursor:pointer; font-size:12px; margin-left:5px;" onclick="removeRound(${r})" title="Delete Round">🗑️</span>
-                </td>`;
-                currentPlayers.forEach(p => {
-                    const scoreObj = currentScores.find(s => s.player_id === p.id && s.round === r);
-                    const val = scoreObj ? scoreObj.score : '';
-                    if (val !== '') totals[p.id] += parseInt(val);
-                    html += `<td><input type="number" class="score-input" value="${val}" onchange="saveScore(${p.id}, ${r}, this.value)"></td>`;
+                teleCanvas.addEventListener('pointerdown', (e) => {
+                    if (!drawingEnabled) return;
+                    e.preventDefault();
+                    if (teleCanvas.setPointerCapture) teleCanvas.setPointerCapture(e.pointerId);
+                    isDrawing = true;
+                    ctx.beginPath();
+                    const p = getCoords(e);
+                    ctx.moveTo(p.x, p.y);
                 });
-                html += `</tr>`;
-            }
-            
-            html += `<tr class="total-row"><td>TOTAL</td>`;
-            const validTotals = Object.values(totals);
-            const targetScore = winCondition === 'lowest' ? Math.min(...validTotals) : Math.max(...validTotals);
-            
-            currentPlayers.forEach(p => {
-                const isWinner = totals[p.id] === targetScore && (winCondition === 'lowest' ? targetScore >= 0 : targetScore > 0) ? "winner-cell" : "";
-                html += `<td class="${isWinner}">🏆 ${totals[p.id]}</td>`;
-            });
-            html += `</tr>`;
-            
-            table.innerHTML = html;
-        }
+                teleCanvas.addEventListener('pointermove', (e) => {
+                    if (!isDrawing) return;
+                    const p = getCoords(e);
+                    ctx.lineTo(p.x, p.y);
+                    ctx.stroke();
+                });
+                const stopDrawing = () => { isDrawing = false; };
+                teleCanvas.addEventListener('pointerup', stopDrawing);
+                teleCanvas.addEventListener('pointercancel', stopDrawing);
+                teleCanvas.addEventListener('pointerleave', stopDrawing);
 
-        async function saveScore(playerId, round, val) {
-            const score = parseInt(val) || 0;
-            const existing = currentScores.find(s => s.player_id === playerId && s.round === round);
-            if (existing) { existing.score = score; } 
-            else { currentScores.push({ player_id: playerId, round: round, score: score }); }
-            renderTable();
-            await fetch('/api/games/score', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ player_id: playerId, round: round, score: score })
-            });
-        }
+                btnDraw.addEventListener('click', () => {
+                    drawingEnabled = !drawingEnabled;
+                    teleCanvas.style.pointerEvents = drawingEnabled ? 'auto' : 'none';
+                    btnDraw.textContent = drawingEnabled ? '✏️ Telestrator: ON' : '✏️ Telestrator: OFF';
+                    btnDraw.classList.toggle('danger', drawingEnabled);
+                    if (!drawingEnabled) isDrawing = false;
+                });
 
-        function addRound() { numRounds++; renderTable(); }
+                btnClear.addEventListener('click', () => {
+                    ctx.clearRect(0, 0, teleCanvas.width, teleCanvas.height);
+                    isDrawing = false;
+                });
 
-        async function removeRound(r) {
-            if (!confirm(`Are you sure you want to delete Round ${r}?`)) return;
-            await fetch(`/api/games/${currentGameId}/round/${r}`, { method: 'DELETE' });
-            loadGame(currentGameId); // Reload to pull shifted rounds
-        }
+                // --- Fullscreen (with Safari/webkit fallbacks) ---
+                function isFullscreen() {
+                    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+                }
+                btnFullscreen.addEventListener('click', () => {
+                    if (!isFullscreen()) {
+                        const el = playerContainer;
+                        if (el.requestFullscreen) el.requestFullscreen();
+                        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+                    } else {
+                        if (document.exitFullscreen) document.exitFullscreen();
+                        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+                    }
+                });
 
-        async function loadHistory() {
-            const res = await fetch('/api/games');
-            const data = await res.json();
-            const list = document.getElementById('history-list');
-            list.innerHTML = data.games.map(g => 
-                `<div class="history-item">
-                    <div>
-                        <a href="#" onclick="loadGame(${g.id})" style="color: #007aff; text-decoration: none; font-weight: bold;">
-                            ${g.display_name} (${g.date.split(' ')[0]})
-                        </a>
-                        <span class="players">👥 ${g.players.join(', ')}</span>
-                    </div>
-                    <span style="cursor:pointer" onclick="removeGame(${g.id})" title="Delete Game">🗑️</span>
-                </div>`
-            ).join('');
-            document.getElementById('history-ui').style.display = 'block';
-            document.getElementById('board-ui').style.display = 'none';
-            document.getElementById('trophy-ui').style.display = 'none';
-        }
+        // --- Instant replay: saved-clip review (~1 FPS .. 5x) ---
+                const reviewVideo = document.getElementById('replay-video');
+                const replayPanel = document.getElementById('replay-panel');
+                const replaySpeed = document.getElementById('replay-speed');
+                const replaySpeedLabel = document.getElementById('replay-speed-label');
+                const replayTime = document.getElementById('replay-time');
+                const replayStatus = document.getElementById('replay-status');
+                const btnInstantReplay = document.getElementById('btn-instant-replay');
+                const btnReplayMove = document.getElementById('btn-replay-move');
+                const btnReplayMove2 = document.getElementById('btn-replay-move2');
+                const btnReplayPlay = document.getElementById('btn-replay-play');
+                const btnBackLive = document.getElementById('btn-back-live');
 
-        async function removeGame(id) {
-            if (!confirm("Are you sure you want to permanently delete this game?")) return;
-            await fetch(`/api/games/${id}`, { method: 'DELETE' });
-            if (currentGameId === id) { currentGameId = null; document.getElementById('board-ui').style.display = 'none'; }
-            loadHistory();
-        }
+                const REPLAY_WINDOW = 60;        // seconds behind live to capture
+                const SOURCE_FPS = 30;           // matches the DVR writer
+                const STEP_MIN_RATE = 0.25;      // below this speed, use frame stepping
 
-        // --- Trophy Room Logic ---
-        async function openTrophyRoom() {
-            const res = await fetch('/api/stats');
-            const stats = await res.json();
-            const grid = document.getElementById('trophy-grid');
-            
-            let html = '';
-            
-            if (stats.most_games.length > 0) {
-                html += `<div class="trophy-card">
-                            <div class="trophy-icon">🕹️</div>
-                            <div class="trophy-title">Tabletop Veteran (Most Games)</div>
-                            <div class="trophy-value">${stats.most_games[0].name}</div>
-                            <div style="font-size:0.8em;color:#aaa;">${stats.most_games[0].count} games played</div>
-                         </div>`;
-            }
-            if (stats.highest_round) {
-                html += `<div class="trophy-card">
-                            <div class="trophy-icon">💣</div>
-                            <div class="trophy-title">The Nuke (Highest Single Round)</div>
-                            <div class="trophy-value">${stats.highest_round.name}</div>
-                            <div style="font-size:0.8em;color:#aaa;">${stats.highest_round.score} pts in ${stats.highest_round.game_name}</div>
-                         </div>`;
-            }
-            if (stats.lowest_round) {
-                html += `<div class="trophy-card">
-                            <div class="trophy-icon">🧘</div>
-                            <div class="trophy-title">Zen Master (Lowest Single Round)</div>
-                            <div class="trophy-value">${stats.lowest_round.name}</div>
-                            <div style="font-size:0.8em;color:#aaa;">${stats.lowest_round.score} pts in ${stats.lowest_round.game_name}</div>
-                         </div>`;
-            }
-            if (stats.most_zeros) {
-                html += `<div class="trophy-card">
-                            <div class="trophy-icon">🍩</div>
-                            <div class="trophy-title">The Donut (Most Flawless Rounds)</div>
-                            <div class="trophy-value">${stats.most_zeros.name}</div>
-                            <div style="font-size:0.8em;color:#aaa;">${stats.most_zeros.count} rounds scoring 0</div>
-                         </div>`;
-            }
-            if (stats.best_avg.length > 0) {
-                html += `<div class="trophy-card">
-                            <div class="trophy-icon">🎯</div>
-                            <div class="trophy-title">Mr. Consistent (Best Average)</div>
-                            <div class="trophy-value">${stats.best_avg[0].name}</div>
-                            <div style="font-size:0.8em;color:#aaa;">${stats.best_avg[0].avg_score} pts/round average</div>
-                         </div>`;
-            }
-            
-            grid.innerHTML = html || "<p style='text-align:center; width:100%; color:#aaa;'>Play some games to earn trophies!</p>";
-            document.getElementById('trophy-ui').style.display = 'block';
-            document.getElementById('history-ui').style.display = 'none';
-            document.getElementById('board-ui').style.display = 'none';
-        }
+                let replayActive = false;
+                let playing = false;
+                let playMode = 'none';           // 'native' | 'step' | 'none'
+                let speedMult = 1 / SOURCE_FPS;  // default = 1 FPS (30x slow-mo)
+                let stepBaseTime = 0;
+                let lastTickMs = 0;
+                let lastFi = -1;
+                let rafId = null;
+
+                function speedFromSlider(v) {
+                    if (v <= 45) return (1 / SOURCE_FPS) + (v / 45) * ((1 / 3) - (1 / SOURCE_FPS));
+                    if (v <= 75) return (1 / 3) + ((v - 45) / 30) * (1 - (1 / 3));
+                    return 1 + ((v - 75) / 25) * (5 - 1);
+                }
+                function speedLabel(m) {
+                    if (m >= 1) return (Math.abs(m - 1) < 0.001 ? '1' : m.toFixed(1)) + '×';
+                    return Math.round(m * SOURCE_FPS) + ' FPS';
+                }
+                function fmtTime(sec) {
+                    if (!isFinite(sec) || sec < 0) sec = 0;
+                    const mm = Math.floor(sec / 60);
+                    const ss = Math.floor(sec % 60);
+                    return mm + ':' + (ss < 10 ? '0' : '') + ss;
+                }
+                function setStatus(msg) { if (replayStatus) replayStatus.textContent = msg; }
+
+                function updateSpeedUI() { replaySpeedLabel.textContent = speedLabel(speedMult); }
+                function updateTimeUI() {
+                    replayTime.textContent = fmtTime(reviewVideo.currentTime) + ' / ' + fmtTime(reviewVideo.duration);
+                }
+                function cancelRAF() {
+                    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+                }
+                function clampLoop(t) {
+                    const d = reviewVideo.duration;
+                    if (d && t >= d) t = t % d;
+                    if (t < 0) t = 0;
+                    return t;
+                }
+                function seek(t) {
+                    reviewVideo.currentTime = clampLoop(t);
+                    lastFi = -1;
+                    updateTimeUI();
+                }
+                function exitReplay() {
+                    playing = false;
+                    cancelRAF();
+                    if (playMode === 'native') reviewVideo.pause();
+                    reviewVideo.pause();
+                    reviewVideo.removeAttribute('src');
+                    reviewVideo.load();
+                    playMode = 'none';
+                    reviewVideo.style.display = 'none';
+                    replayPanel.style.display = 'none';
+                    replaySpeed.disabled = true;
+                    liveCanvas.style.display = 'block';
+                    replayActive = false;
+                    btnReplayPlay.textContent = '▶ Play';
+                    setStatus('');
+                }
+                function enterReplay() {
+                    replayActive = true;
+                    liveCanvas.style.display = 'none';
+                    reviewVideo.style.display = 'block';
+                    replayPanel.style.display = 'flex';
+                    replaySpeed.disabled = false;
+                    updateSpeedUI();
+                }
+
+                function playNative() {
+                    playMode = 'native';
+                    cancelRAF();
+                    reviewVideo.playbackRate = speedMult;
+                    const p = reviewVideo.play();
+                    if (p) p.catch(function () { playing = false; });
+                }
+                function playStep() {
+                    playMode = 'step';
+                    reviewVideo.pause();
+                    stepBaseTime = reviewVideo.currentTime;
+                    lastTickMs = performance.now();
+                    lastFi = -1;
+                    rafId = requestAnimationFrame(stepTick);
+                }
+                function stepTick(now) {
+                    if (!playing || playMode !== 'step') return;
+                    let dt = (now - lastTickMs) / 1000;
+                    lastTickMs = now;
+                    if (!isFinite(dt)) dt = 0;
+                    stepBaseTime += Math.min(dt, 0.5) * speedMult;
+                    const d = reviewVideo.duration;
+                    if (d && stepBaseTime >= d) stepBaseTime = stepBaseTime % d;
+                    const fi = Math.floor(stepBaseTime * SOURCE_FPS);
+                    if (fi !== lastFi) {
+                        lastFi = fi;
+                        reviewVideo.currentTime = Math.max(0, fi / SOURCE_FPS);
+                    }
+                    updateTimeUI();
+                    if (playing && playMode === 'step') rafId = requestAnimationFrame(stepTick);
+                }
+                function onPlayPause() {
+                    if (!replayActive) return;
+                    if (playing) {
+                        playing = false;
+                        cancelRAF();
+                        if (playMode === 'native') reviewVideo.pause();
+                        btnReplayPlay.textContent = '▶ Play';
+                    } else {
+                        playing = true;
+                        btnReplayPlay.textContent = '⏸ Pause';
+                        if (speedMult >= STEP_MIN_RATE) playNative();
+                        else playStep();
+                    }
+                }
+                function frameJump(sign) {
+                    if (!replayActive) return;
+                    playing = false;
+                    cancelRAF();
+                    if (playMode === 'native') reviewVideo.pause();
+                    playMode = 'none';
+                    btnReplayPlay.textContent = '▶ Play';
+                    seek(reviewVideo.currentTime + sign * (1 / SOURCE_FPS));
+                }
+                function beginPlayback() {
+                    playing = true;
+                    btnReplayPlay.textContent = '⏸ Pause';
+                    lastFi = -1;
+                    stepBaseTime = 0;
+                    lastTickMs = performance.now();
+                    if (speedMult >= STEP_MIN_RATE) playNative();
+                    else { playMode = 'step'; rafId = requestAnimationFrame(stepTick); }
+                }
+
+                btnInstantReplay.addEventListener('click', function () {
+                    setStatus('Saving last ' + REPLAY_WINDOW + 's…');
+                    fetch('/api/replay/capture', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ window: REPLAY_WINDOW })
+                    }).then(function (r) {
+                        return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+                    }).then(function (res) {
+                        if (!res.ok || !res.j.url) {
+                            setStatus('Replay failed: ' + (res.j.detail || 'unknown error'));
+                            return;
+                        }
+                        enterReplay();
+                        reviewVideo.src = res.j.url;
+                        reviewVideo.load();
+                        reviewVideo.addEventListener('loadedmetadata', function () {
+                            reviewVideo.currentTime = 0;
+                            beginPlayback();
+                        }, { once: true });
+                    }).catch(function (e) { setStatus('Replay failed: ' + e.message); });
+                });
+
+                replaySpeed.addEventListener('input', function () {
+                    speedMult = speedFromSlider(parseFloat(replaySpeed.value));
+                    updateSpeedUI();
+                    if (!replayActive || !playing) return;
+                    if (speedMult >= STEP_MIN_RATE && playMode === 'step') playNative();
+                    else if (speedMult < STEP_MIN_RATE && playMode === 'native') playStep();
+                });
+
+                btnReplayPlay.addEventListener('click', onPlayPause);
+                btnReplayMove.addEventListener('click', function () { frameJump(-1); });
+                btnReplayMove2.addEventListener('click', function () { frameJump(1); });
+                btnBackLive.addEventListener('click', exitReplay);
+                reviewVideo.addEventListener('timeupdate', updateTimeUI);
+                reviewVideo.addEventListener('ended', function () {
+                    if (!playing || playMode !== 'native') return;
+                    reviewVideo.currentTime = 0;
+                    reviewVideo.play().catch(function () { playing = false; });
+                });
+
+        });
     </script>
 </body>
-</html> 
+</html>

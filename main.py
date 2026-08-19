@@ -1,13 +1,20 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import sqlite3
 import engine
 import os
+import base64
+import threading
+import time
+import asyncio
 
 app = FastAPI()
 DB_PATH = "/app/buffer/games.db"
+
+# Serializes MP4 exports so only one ffmpeg render runs at a time
+export_lock = threading.Lock()
 
 # --- DATABASE INIT & MIGRATION ---
 def init_db():
@@ -28,10 +35,29 @@ def init_db():
 
 @app.on_event("startup")
 async def startup_event():
-    engine.start_hls_buffer()
+    engine.start_live(asyncio.get_running_loop())
     init_db()
 
 app.mount("/buffer", StaticFiles(directory="/app/buffer"), name="buffer")
+
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    """Low-latency live view: the server pushes each camera JPEG frame as a
+    binary WebSocket message; the browser blits it straight to a <canvas>.
+    This replaces the old HLS live path that caused 10-20s of latency."""
+    await websocket.accept()
+    q = asyncio.Queue(maxsize=4)
+    engine.add_client(q)
+    try:
+        while True:
+            frame = await q.get()
+            await websocket.send_bytes(frame)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        engine.remove_client(q)
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -169,4 +195,74 @@ def get_stats():
         "lowest_round": dict(lowest_round) if lowest_round else None,
         "most_zeros": dict(most_zeros) if most_zeros else None,
         "best_avg": [dict(r) for r in best_avg]
+    }
+
+# --- REPLAY / DVR EXPORT API ---
+
+class ReplayExportReq(BaseModel):
+    start: float
+    end: float
+    speed: float = 1.0
+    markup: str | None = None  # data URL or raw base64 of the telestration PNG
+    name: str | None = None
+
+@app.get("/api/replay/timeline")
+def replay_timeline():
+    """Return the available buffer and segment list to drive the scrubber."""
+    return engine.list_segments()
+
+@app.post("/api/replay/export")
+def replay_export(req: ReplayExportReq):
+    """Render the selected clip as a slow-mo, marked-up MP4."""
+    if req.speed <= 0:
+        raise HTTPException(status_code=400, detail="Speed must be positive")
+
+    markup_path = None
+    if req.markup:
+        # Accept either a data URL (data:image/png;base64,...) or raw base64
+        b64 = req.markup.split(",", 1)[-1]
+        markup_path = os.path.join(engine.EXPORT_DIR, "markup.png")
+        with open(markup_path, "wb") as f:
+            f.write(base64.b64decode(b64))
+
+    filename = req.name or f"clip_{int(time.time())}.mp4"
+    if not filename.endswith(".mp4"):
+        filename += ".mp4"
+
+    with export_lock:
+        try:
+            out_path = engine.export_clip(
+                req.start, req.end, req.speed, markup_path, filename
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "url": f"/buffer/exports/{os.path.basename(out_path)}",
+        "filename": os.path.basename(out_path),
+    }
+
+class ReplayCaptureReq(BaseModel):
+    window: float = 60.0
+    name: str | None = None
+
+@app.post("/api/replay/capture")
+def replay_capture(req: ReplayCaptureReq):
+    """Save the most recent `window` seconds of the live buffer as a playable
+    MP4 for interactive instant replay (seekable from ~1 FPS to 5x)."""
+    if not (1.0 <= req.window <= 600.0):
+        raise HTTPException(status_code=400, detail="Window must be 1-600 seconds")
+
+    with export_lock:
+        try:
+            result = engine.capture_clip(req.window, req.name)
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "url": f"/buffer/exports/{result['url_name']}",
+        "filename": result["url_name"],
+        "start": result["start"],
+        "end": result["end"],
+        "duration": result["duration"],
     }

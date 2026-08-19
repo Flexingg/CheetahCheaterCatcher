@@ -1,0 +1,12 @@
+# Replay data is bind-mounted at runtime (./replay_data:/app/buffer), so it
+# MUST NOT be packed into the image or copied by COPY . . -- it made the build
+# context ~4GB and rebuilds take 10+ minutes.
+replay_data
+
+# Local/dev cruft and secrets (compose reads .env from the host, not the image)
+.git
+__pycache__
+*.pyc
+.env
+.DS_Store
+*~
