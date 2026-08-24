@@ -27,6 +27,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   CameraController? _cameraController;
   int _selectedCameraIndex = 0;
   bool _isCameraInitialized = false;
+  String? _errorMessage;
   bool _isProcessingFrame = false;
   DateTime _lastFrameTime = DateTime.now();
 
@@ -40,6 +41,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   double _zoom = 1.0;
   double _minZoom = 1.0;
   double _maxZoom = 4.0;
+  bool _showAlignmentGrid = true;
 
   @override
   void initState() {
@@ -49,6 +51,9 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   }
 
   Future<void> _initAll() async {
+    setState(() {
+      _errorMessage = null;
+    });
     await _initBroadcasting();
     await _initCamera();
   }
@@ -106,11 +111,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     try {
       _availableCameras = await availableCameras();
       if (_availableCameras.isEmpty) {
-        debugPrint('No cameras available on this device');
+        setState(() {
+          _errorMessage = 'No camera lenses found on this device.';
+        });
         return;
       }
 
-      // Default to back camera
+      // Select back camera by default for overhead table viewing
       _selectedCameraIndex = 0;
       for (int i = 0; i < _availableCameras.length; i++) {
         if (_availableCameras[i].lensDirection == CameraLensDirection.back) {
@@ -120,28 +127,39 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       }
 
       await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+    } on CameraException catch (e) {
+      debugPrint('Camera permission or hardware error: $e');
+      setState(() {
+        _errorMessage = 'Camera Access: ${e.description ?? e.code}';
+      });
     } catch (e) {
-      debugPrint('Error initializing camera: $e');
+      debugPrint('Error finding cameras: $e');
+      setState(() {
+        _errorMessage = 'Failed to access camera: $e';
+      });
     }
   }
 
   Future<void> _startCameraInstance(CameraDescription description) async {
-    await _cameraController?.dispose();
-    _cameraController = null;
-    _isCameraInitialized = false;
-    if (mounted) setState(() {});
-
-    final controller = CameraController(
-      description,
-      ResolutionPreset.medium, // 720p/480p is ideal for 25-30 FPS low latency WiFi
-      enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420,
-    );
-
-    _cameraController = controller;
-
     try {
+      if (_cameraController != null) {
+        await _cameraController!.dispose();
+        _cameraController = null;
+      }
+
+      _isCameraInitialized = false;
+      if (mounted) setState(() {});
+
+      final controller = CameraController(
+        description,
+        ResolutionPreset.medium, // 720p/480p ideal balance for ultra-low latency & 30fps Wi-Fi stream
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.yuv420,
+      );
+
+      _cameraController = controller;
       await controller.initialize();
+
       if (!mounted) return;
 
       _minZoom = await controller.getMinZoomLevel();
@@ -153,15 +171,19 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
       setState(() {
         _isCameraInitialized = true;
+        _errorMessage = null;
       });
     } catch (e) {
-      debugPrint('Camera start error: $e');
+      debugPrint('Camera startup error: $e');
+      setState(() {
+        _errorMessage = 'Camera initialization error: $e';
+      });
     }
   }
 
   void _handleCameraImage(CameraImage image) {
-    // Throttle frame processing to target ~25 FPS (40ms interval) to keep device cool and smooth
     final now = DateTime.now();
+    // Throttle to target ~25-30 FPS (35ms interval) to keep phone cool and stream ultra-smooth
     if (_isProcessingFrame || now.difference(_lastFrameTime).inMilliseconds < 35) {
       return;
     }
@@ -181,7 +203,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
         _server.injectFrame(jpeg);
       }
     } catch (e) {
-      debugPrint('Frame conversion error: $e');
+      debugPrint('Frame processing error: $e');
     } finally {
       _isProcessingFrame = false;
     }
@@ -260,8 +282,16 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Jokarz Eye (Camera Broadcaster)'),
+        title: const Text('Jokarz Eye (Camera Streamer)'),
         actions: [
+          IconButton(
+            icon: Icon(
+              _showAlignmentGrid ? Icons.grid_on : Icons.grid_off,
+              color: _showAlignmentGrid ? JokarzColors.gold : JokarzColors.textMuted,
+            ),
+            tooltip: 'Toggle Table Grid',
+            onPressed: () => setState(() => _showAlignmentGrid = !_showAlignmentGrid),
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code_2, color: JokarzColors.gold),
             tooltip: 'Show Pairing QR',
@@ -274,7 +304,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Network & Camera',
+            tooltip: 'Refresh Camera',
             onPressed: _initAll,
           ),
         ],
@@ -285,9 +315,9 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Live Camera Viewfinder
+              // Large Tabletop Viewfinder Preview
               Container(
-                height: 260,
+                height: 320,
                 decoration: BoxDecoration(
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(20),
@@ -295,15 +325,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     color: _isServerRunning && _server.currentFps > 0
                         ? JokarzColors.emerald
                         : JokarzColors.gold,
-                    width: 2,
+                    width: 2.2,
                   ),
                   boxShadow: [
                     BoxShadow(
                       color: (_isServerRunning && _server.currentFps > 0
                               ? JokarzColors.emerald
                               : JokarzColors.gold)
-                          .withAlpha(60),
-                      blurRadius: 18,
+                          .withAlpha(80),
+                      blurRadius: 20,
                       offset: const Offset(0, 4),
                     ),
                   ],
@@ -312,9 +342,41 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
+                    // Camera Live Viewport
                     if (_isCameraInitialized && _cameraController != null)
                       Center(
-                        child: CameraPreview(_cameraController!),
+                        child: FittedBox(
+                          fit: BoxFit.cover,
+                          child: SizedBox(
+                            width: _cameraController!.value.previewSize?.height ?? 640,
+                            height: _cameraController!.value.previewSize?.width ?? 480,
+                            child: CameraPreview(_cameraController!),
+                          ),
+                        ),
+                      )
+                    else if (_errorMessage != null)
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.videocam_off, size: 44, color: JokarzColors.crimson),
+                              const SizedBox(height: 10),
+                              Text(
+                                _errorMessage!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                              const SizedBox(height: 12),
+                              ElevatedButton.icon(
+                                icon: const Icon(Icons.refresh, size: 18),
+                                label: const Text('Retry Camera'),
+                                onPressed: _initCamera,
+                              ),
+                            ],
+                          ),
+                        ),
                       )
                     else
                       const Center(
@@ -322,12 +384,22 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             CircularProgressIndicator(color: JokarzColors.gold),
-                            SizedBox(height: 12),
+                            SizedBox(height: 14),
                             Text(
-                              'STARTING HARDWARE CAMERA...',
-                              style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold),
+                              'CONNECTING TABLETOP CAMERA...',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 12),
                             ),
                           ],
+                        ),
+                      ),
+
+                    // Framing Alignment Grid Overlay
+                    if (_showAlignmentGrid && _isCameraInitialized)
+                      IgnorePointer(
+                        child: CustomPaint(
+                          painter: _TableAlignmentGridPainter(),
+                          child: const SizedBox.expand(),
                         ),
                       ),
 
@@ -340,9 +412,9 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                             decoration: BoxDecoration(
-                              color: Colors.black.withAlpha(200),
+                              color: Colors.black.withAlpha(220),
                               borderRadius: BorderRadius.circular(20),
                               border: Border.all(
                                 color: _server.currentFps > 0
@@ -364,7 +436,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  _server.currentFps > 0 ? 'LIVE BROADCAST' : 'INITIALIZING',
+                                  _server.currentFps > 0 ? 'STREAMING LIVE' : 'INITIALIZING SENSOR',
                                   style: TextStyle(
                                     fontSize: 10,
                                     fontWeight: FontWeight.w900,
@@ -378,17 +450,17 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                             ),
                           ),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                             decoration: BoxDecoration(
-                              color: Colors.black.withAlpha(200),
+                              color: Colors.black.withAlpha(220),
                               borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: JokarzColors.gold.withAlpha(150)),
+                              border: Border.all(color: JokarzColors.gold),
                             ),
                             child: Text(
                               '${_server.currentFps} FPS',
                               style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
                                 color: JokarzColors.gold,
                                 fontFamily: 'monospace',
                               ),
@@ -398,28 +470,30 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                       ),
                     ),
 
-                    // Bottom Quick Overlay Actions
+                    // Bottom Viewfinder Floating Controls
                     Positioned(
-                      bottom: 10,
+                      bottom: 12,
                       left: 12,
                       right: 12,
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          // Torch Toggle
+                          // Torch Button
                           FloatingActionButton.small(
                             heroTag: 'torchBtn',
                             backgroundColor: _torchOn ? JokarzColors.gold : Colors.black87,
                             foregroundColor: _torchOn ? Colors.black : JokarzColors.gold,
                             onPressed: () => _setTorch(!_torchOn),
+                            tooltip: 'Toggle Table Spotlight',
                             child: Icon(_torchOn ? Icons.flashlight_on : Icons.flashlight_off),
                           ),
-                          // Viewers Pill
+                          // Viewers Connected Badge
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
-                              color: Colors.black.withAlpha(200),
+                              color: Colors.black.withAlpha(220),
                               borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: JokarzColors.cardBorder),
                             ),
                             child: Row(
                               children: [
@@ -432,12 +506,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                               ],
                             ),
                           ),
-                          // Flip Camera
+                          // Flip Camera Button
                           FloatingActionButton.small(
                             heroTag: 'flipBtn',
                             backgroundColor: Colors.black87,
                             foregroundColor: JokarzColors.gold,
                             onPressed: _flipCamera,
+                            tooltip: 'Flip Lens',
                             child: const Icon(Icons.flip_camera_ios),
                           ),
                         ],
@@ -449,7 +524,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
               const SizedBox(height: 16),
 
-              // Fast Pairing Buttons (QR Code + Hotspot)
+              // Fast 1-Sec Pairing & Hotspot Row
               Row(
                 children: [
                   Expanded(
@@ -457,10 +532,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                       style: ElevatedButton.styleFrom(
                         backgroundColor: JokarzColors.gold,
                         foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      icon: const Icon(Icons.qr_code_scanner, size: 18),
-                      label: const Text('1-Sec QR Pair'),
+                      icon: const Icon(Icons.qr_code_scanner, size: 20),
+                      label: const Text(
+                        '1-Sec QR Pair',
+                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.8),
+                      ),
                       onPressed: _showQrDialog,
                     ),
                   ),
@@ -469,11 +547,14 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     child: OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
                         foregroundColor: JokarzColors.emerald,
-                        side: const BorderSide(color: JokarzColors.emerald),
-                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        side: const BorderSide(color: JokarzColors.emerald, width: 1.5),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
-                      icon: const Icon(Icons.wifi_tethering, size: 18),
-                      label: const Text('0-Router Guide'),
+                      icon: const Icon(Icons.wifi_tethering, size: 20),
+                      label: const Text(
+                        '0-Router Guide',
+                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.8),
+                      ),
                       onPressed: _showOfflineHotspotGuide,
                     ),
                   ),
@@ -482,7 +563,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
               const SizedBox(height: 16),
 
-              // Telemetry Stats Card
+              // Telemetry Stats Row
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
@@ -493,8 +574,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildStatItem('Viewers', '${_server.activeViewers}', Icons.people),
-                    _buildStatItem('Duration', _formatTime(_secondsStreaming), Icons.timer),
+                    _buildStatItem('Active Viewers', '${_server.activeViewers}', Icons.people),
+                    _buildStatItem('Uptime', _formatTime(_secondsStreaming), Icons.timer),
                     _buildStatItem('Port', '${AppConstants.defaultHttpPort}', Icons.lan),
                   ],
                 ),
@@ -502,7 +583,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
               const SizedBox(height: 16),
 
-              // Network Connection Information Box
+              // Direct Wi-Fi Connection Information Box
               JokarzCard(
                 borderColor: JokarzColors.gold.withAlpha(150),
                 child: Column(
@@ -571,13 +652,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
               const SizedBox(height: 16),
 
-              // Hardware Controls
+              // Tabletop Zoom Control Card
               JokarzCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'TABLETOP ZOOM & LIGHTING',
+                      'TABLETOP OPTICAL / DIGITAL ZOOM',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -586,13 +667,14 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                       ),
                     ),
                     const SizedBox(height: 14),
-
-                    // Digital Zoom Slider
                     Row(
                       children: [
                         const Icon(Icons.zoom_in, color: JokarzColors.gold),
                         const SizedBox(width: 10),
-                        Text('Zoom: ${_zoom.toStringAsFixed(1)}x', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        Text(
+                          'Zoom: ${_zoom.toStringAsFixed(1)}x',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
                         Expanded(
                           child: Slider(
                             value: _zoom.clamp(_minZoom, _maxZoom),
@@ -644,4 +726,37 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     final s = seconds % 60;
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
+}
+
+/// Custom painter that draws a subtle poker table framing grid to align the camera over cards
+class _TableAlignmentGridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = JokarzColors.gold.withAlpha(70)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    // 3x3 Rule of Thirds Grid
+    final thirdW = size.width / 3;
+    final thirdH = size.height / 3;
+
+    canvas.drawLine(Offset(thirdW, 0), Offset(thirdW, size.height), paint);
+    canvas.drawLine(Offset(thirdW * 2, 0), Offset(thirdW * 2, size.height), paint);
+    canvas.drawLine(Offset(0, thirdH), Offset(size.width, thirdH), paint);
+    canvas.drawLine(Offset(0, thirdH * 2), Offset(size.width, thirdH * 2), paint);
+
+    // Center Crosshair
+    final centerPaint = Paint()
+      ..color = JokarzColors.emerald.withAlpha(120)
+      ..strokeWidth = 1.5;
+
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    canvas.drawLine(Offset(cx - 15, cy), Offset(cx + 15, cy), centerPaint);
+    canvas.drawLine(Offset(cx, cy - 15), Offset(cx, cy + 15), centerPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
