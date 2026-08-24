@@ -42,6 +42,8 @@ dependencies:
   camera: ^0.11.2+1
   image: ^4.9.2
   flutter_launcher_icons: ^0.14.4
+  permission_handler: 11.3.1
+  torch_light: ^1.1.0
 
 dev_dependencies:
   flutter_test:

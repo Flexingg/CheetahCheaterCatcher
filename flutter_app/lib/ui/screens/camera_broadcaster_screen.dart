@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:torch_light/torch_light.dart';
 import '../../constants/app_constants.dart';
 import '../../constants/app_theme.dart';
 import '../../services/camera_frame_converter.dart';
@@ -27,6 +29,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   CameraController? _cameraController;
   int _selectedCameraIndex = 0;
   bool _isCameraInitialized = false;
+  bool _hasPermission = false;
   String? _errorMessage;
   bool _isProcessingFrame = false;
   DateTime _lastFrameTime = DateTime.now();
@@ -42,6 +45,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   double _minZoom = 1.0;
   double _maxZoom = 4.0;
   bool _showAlignmentGrid = true;
+  bool _isFullScreenPreview = false;
 
   @override
   void initState() {
@@ -55,7 +59,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       _errorMessage = null;
     });
     await _initBroadcasting();
-    await _initCamera();
+    await _checkPermissionsAndInitCamera();
   }
 
   Future<void> _initBroadcasting() async {
@@ -107,17 +111,37 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     }
   }
 
+  Future<void> _checkPermissionsAndInitCamera() async {
+    var status = await Permission.camera.status;
+    if (!status.isGranted) {
+      status = await Permission.camera.request();
+    }
+
+    if (status.isGranted) {
+      setState(() {
+        _hasPermission = true;
+        _errorMessage = null;
+      });
+      await _initCamera();
+    } else {
+      setState(() {
+        _hasPermission = false;
+        _errorMessage = 'Camera permission required to see and stream tabletop video.';
+      });
+    }
+  }
+
   Future<void> _initCamera() async {
     try {
       _availableCameras = await availableCameras();
       if (_availableCameras.isEmpty) {
         setState(() {
-          _errorMessage = 'No camera lenses found on this device.';
+          _errorMessage = 'No camera hardware found on this device.';
         });
         return;
       }
 
-      // Select back camera by default for overhead table viewing
+      // Default to back camera for overhead tabletop viewing
       _selectedCameraIndex = 0;
       for (int i = 0; i < _availableCameras.length; i++) {
         if (_availableCameras[i].lensDirection == CameraLensDirection.back) {
@@ -127,15 +151,10 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       }
 
       await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-    } on CameraException catch (e) {
-      debugPrint('Camera permission or hardware error: $e');
-      setState(() {
-        _errorMessage = 'Camera Access: ${e.description ?? e.code}';
-      });
     } catch (e) {
       debugPrint('Error finding cameras: $e');
       setState(() {
-        _errorMessage = 'Failed to access camera: $e';
+        _errorMessage = 'Camera search error: $e';
       });
     }
   }
@@ -152,7 +171,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
       final controller = CameraController(
         description,
-        ResolutionPreset.medium, // 720p/480p ideal balance for ultra-low latency & 30fps Wi-Fi stream
+        ResolutionPreset.medium, // 720p/480p ideal balance for ultra-low latency & 30fps Wi-Fi streaming
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -166,7 +185,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       _maxZoom = (await controller.getMaxZoomLevel()).clamp(1.0, 8.0);
       _zoom = _minZoom;
 
-      // Start live image stream for network broadcasting
+      // Start image stream for network broadcasting
       await controller.startImageStream(_handleCameraImage);
 
       setState(() {
@@ -210,11 +229,26 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   }
 
   Future<void> _setTorch(bool enable) async {
-    if (_cameraController == null || !_isCameraInitialized) return;
+    // 1. Try native TorchLight plugin (Android CameraManager.setTorchMode)
     try {
-      await _cameraController!.setFlashMode(enable ? FlashMode.torch : FlashMode.off);
+      if (enable) {
+        await TorchLight.enableTorch();
+      } else {
+        await TorchLight.disableTorch();
+      }
       if (mounted) setState(() => _torchOn = enable);
-    } catch (_) {}
+      return;
+    } catch (e) {
+      debugPrint('TorchLight plugin notice: $e');
+    }
+
+    // 2. Fallback to CameraController flash mode
+    if (_cameraController != null && _isCameraInitialized) {
+      try {
+        await _cameraController!.setFlashMode(enable ? FlashMode.torch : FlashMode.off);
+        if (mounted) setState(() => _torchOn = enable);
+      } catch (_) {}
+    }
   }
 
   Future<void> _setZoom(double zoomVal) async {
@@ -238,7 +272,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     if (state == AppLifecycleState.inactive) {
       _cameraController?.dispose();
     } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
+      _checkPermissionsAndInitCamera();
     }
   }
 
@@ -270,6 +304,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     _durationTimer?.cancel();
     _uiRefreshTimer?.cancel();
     _cameraController?.dispose();
+    _setTorch(false);
     _server.stopServer();
     _discovery.stopBroadcasting();
     super.dispose();
@@ -315,9 +350,9 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Large Tabletop Viewfinder Preview
+              // Large Tabletop Viewfinder Monitor
               Container(
-                height: 320,
+                height: _isFullScreenPreview ? 460 : 320,
                 decoration: BoxDecoration(
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(20),
@@ -342,7 +377,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // Camera Live Viewport
+                    // Live Camera Viewport (Always visible on phone screen)
                     if (_isCameraInitialized && _cameraController != null)
                       Center(
                         child: FittedBox(
@@ -351,6 +386,35 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                             width: _cameraController!.value.previewSize?.height ?? 640,
                             height: _cameraController!.value.previewSize?.width ?? 480,
                             child: CameraPreview(_cameraController!),
+                          ),
+                        ),
+                      )
+                    else if (!_hasPermission)
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.videocam_off, size: 48, color: JokarzColors.crimson),
+                              const SizedBox(height: 12),
+                              const Text(
+                                'CAMERA PERMISSION REQUIRED',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 14),
+                              ),
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Allow camera access so Jokarz Eye can broadcast your game table.',
+                                textAlign: TextAlign.center,
+                                style: TextStyle(color: JokarzColors.textSecondary, fontSize: 12),
+                              ),
+                              const SizedBox(height: 14),
+                              ElevatedButton(
+                                onPressed: _checkPermissionsAndInitCamera,
+                                child: const Text('Grant Camera Permission'),
+                              ),
+                            ],
                           ),
                         ),
                       )
@@ -449,22 +513,35 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                               ],
                             ),
                           ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withAlpha(220),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(color: JokarzColors.gold),
-                            ),
-                            child: Text(
-                              '${_server.currentFps} FPS',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w900,
-                                color: JokarzColors.gold,
-                                fontFamily: 'monospace',
+                          Row(
+                            children: [
+                              IconButton(
+                                icon: Icon(
+                                  _isFullScreenPreview ? Icons.fullscreen_exit : Icons.fullscreen,
+                                  color: JokarzColors.gold,
+                                  size: 22,
+                                ),
+                                tooltip: 'Expand Viewfinder',
+                                onPressed: () => setState(() => _isFullScreenPreview = !_isFullScreenPreview),
                               ),
-                            ),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withAlpha(220),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: JokarzColors.gold),
+                                ),
+                                child: Text(
+                                  '${_server.currentFps} FPS',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w900,
+                                    color: JokarzColors.gold,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -478,13 +555,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          // Torch Button
+                          // Table Spotlight Torch Toggle
                           FloatingActionButton.small(
                             heroTag: 'torchBtn',
                             backgroundColor: _torchOn ? JokarzColors.gold : Colors.black87,
                             foregroundColor: _torchOn ? Colors.black : JokarzColors.gold,
                             onPressed: () => _setTorch(!_torchOn),
-                            tooltip: 'Toggle Table Spotlight',
+                            tooltip: 'Toggle Table Spotlight (Flash)',
                             child: Icon(_torchOn ? Icons.flashlight_on : Icons.flashlight_off),
                           ),
                           // Viewers Connected Badge
@@ -728,7 +805,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   }
 }
 
-/// Custom painter that draws a subtle poker table framing grid to align the camera over cards
+/// Custom painter that draws a subtle table framing grid to align the camera over cards
 class _TableAlignmentGridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
