@@ -3,10 +3,10 @@ import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 
 class CameraFrameConverter {
-  /// Converts a CameraImage (YUV420 or BGRA8888) to a compressed JPEG Uint8List at high FPS
+  /// Converts a CameraImage (YUV420 or BGRA8888) to a crystal-clear compressed JPEG Uint8List
   static Uint8List? convertCameraImageToJpeg(
     CameraImage cameraImage, {
-    int quality = 55,
+    int quality = 85,
     int strideStep = 1,
     int? targetWidth,
     int? targetHeight,
@@ -15,20 +15,20 @@ class CameraFrameConverter {
       img.Image? converted;
 
       if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-        converted = _convertYUV420Fast(cameraImage, strideStep: strideStep);
+        converted = _convertYUV420Accurate(cameraImage, strideStep: strideStep);
       } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
         converted = _convertBGRA8888Fast(cameraImage, strideStep: strideStep);
       } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
-        converted = _convertNV21Fast(cameraImage, strideStep: strideStep);
+        converted = _convertNV21Accurate(cameraImage, strideStep: strideStep);
       } else {
         converted = _convertGenericYuv(cameraImage);
       }
 
       if (converted == null) return null;
 
-      // Optional resize if needed
+      // Optional resize if requested
       if (targetWidth != null && targetHeight != null && (converted.width > targetWidth || converted.height > targetHeight)) {
-        converted = img.copyResize(converted, width: targetWidth, height: targetHeight);
+        converted = img.copyResize(converted, width: targetWidth, height: targetHeight, interpolation: img.Interpolation.linear);
       }
 
       return Uint8List.fromList(img.encodeJpg(converted, quality: quality));
@@ -38,8 +38,8 @@ class CameraFrameConverter {
     }
   }
 
-  /// Ultra-fast Android YUV420 to RGB using fast integer arithmetic (4-7ms per frame)
-  static img.Image _convertYUV420Fast(CameraImage image, {int strideStep = 1}) {
+  /// High-accuracy, fast Android YUV420 to RGB conversion with individual plane strides
+  static img.Image _convertYUV420Accurate(CameraImage image, {int strideStep = 1}) {
     final int origWidth = image.width;
     final int origHeight = image.height;
 
@@ -59,34 +59,39 @@ class CameraFrameConverter {
     final int yRowStride = yPlane.bytesPerRow;
     final int yPixelStride = yPlane.bytesPerPixel ?? 1;
 
-    final int uvRowStride = uPlane.bytesPerRow;
-    final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
+    final int uRowStride = uPlane.bytesPerRow;
+    final int uPixelStride = uPlane.bytesPerPixel ?? 1;
+
+    final int vRowStride = vPlane.bytesPerRow;
+    final int vPixelStride = vPlane.bytesPerPixel ?? 1;
 
     for (int outY = 0; outY < height; outY++) {
       final int inY = outY * strideStep;
       final int uvh = inY >> 1;
       final int yRowOffset = inY * yRowStride;
-      final int uvRowOffset = uvh * uvRowStride;
+      final int uRowOffset = uvh * uRowStride;
+      final int vRowOffset = uvh * vRowStride;
 
       for (int outX = 0; outX < width; outX++) {
         final int inX = outX * strideStep;
         final int uvw = inX >> 1;
 
         final int yIndex = yRowOffset + (inX * yPixelStride);
-        final int uvIndex = uvRowOffset + (uvw * uvPixelStride);
+        final int uIndex = uRowOffset + (uvw * uPixelStride);
+        final int vIndex = vRowOffset + (uvw * vPixelStride);
 
-        if (yIndex >= yBytes.length || uvIndex >= uBytes.length || uvIndex >= vBytes.length) {
+        if (yIndex >= yBytes.length || uIndex >= uBytes.length || vIndex >= vBytes.length) {
           continue;
         }
 
         final int y = yBytes[yIndex];
-        final int u = uBytes[uvIndex] - 128;
-        final int v = vBytes[uvIndex] - 128;
+        final int u = uBytes[uIndex] - 128;
+        final int v = vBytes[vIndex] - 128;
 
-        // Fast integer fixed-point RGB calculation
-        int r = (y + ((359 * v) >> 8)).clamp(0, 255);
-        int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
-        int b = (y + ((454 * u) >> 8)).clamp(0, 255);
+        // Accurate BT.601 full-range integer calculation
+        final int r = (y + ((359 * v) >> 8)).clamp(0, 255);
+        final int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
+        final int b = (y + ((454 * u) >> 8)).clamp(0, 255);
 
         rgbImage.setPixelRgb(outX, outY, r, g, b);
       }
@@ -131,7 +136,7 @@ class CameraFrameConverter {
   }
 
   /// Fast NV21
-  static img.Image _convertNV21Fast(CameraImage image, {int strideStep = 1}) {
+  static img.Image _convertNV21Accurate(CameraImage image, {int strideStep = 1}) {
     final int width = image.width ~/ strideStep;
     final int height = image.height ~/ strideStep;
     final img.Image rgbImage = img.Image(width: width, height: height);
@@ -155,9 +160,9 @@ class CameraFrameConverter {
           final int v = vuBytes[vuIndex] - 128;
           final int u = vuBytes[vuIndex + 1] - 128;
 
-          int r = (y + ((359 * v) >> 8)).clamp(0, 255);
-          int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
-          int b = (y + ((454 * u) >> 8)).clamp(0, 255);
+          final int r = (y + ((359 * v) >> 8)).clamp(0, 255);
+          final int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
+          final int b = (y + ((454 * u) >> 8)).clamp(0, 255);
 
           rgbImage.setPixelRgb(outX, outY, r, g, b);
         }

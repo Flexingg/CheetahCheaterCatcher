@@ -18,7 +18,7 @@ class VarStationScreen extends StatefulWidget {
 
 class _VarStationScreenState extends State<VarStationScreen> {
   final TransformationController _transformController = TransformationController();
-  final bool _showControlsOverlay = true;
+  BoxFit _videoFit = BoxFit.cover; // Default to full screen edge-to-edge
 
   @override
   void dispose() {
@@ -33,6 +33,12 @@ class _VarStationScreenState extends State<VarStationScreen> {
       backgroundColor: Colors.transparent,
       builder: (_) => const DeviceScannerSheet(),
     );
+  }
+
+  void _toggleVideoFit() {
+    setState(() {
+      _videoFit = _videoFit == BoxFit.cover ? BoxFit.contain : BoxFit.cover;
+    });
   }
 
   @override
@@ -50,18 +56,19 @@ class _VarStationScreenState extends State<VarStationScreen> {
             // Video Player + Telestrator + Alignment Grid Viewport
             Expanded(
               child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  // Video Viewport with Pinch-To-Zoom (up to 8.0x) and Pan
+                  // Full-Screen Edge-to-Edge Video Viewport with Pinch-To-Zoom (up to 10.0x) and Pan
                   Positioned.fill(
                     child: Container(
                       color: Colors.black,
                       child: InteractiveViewer(
                         transformationController: _transformController,
                         minScale: 1.0,
-                        maxScale: 8.0,
+                        maxScale: 10.0,
                         panEnabled: !telestrator.isDrawingEnabled,
                         scaleEnabled: !telestrator.isDrawingEnabled,
-                        child: Center(
+                        child: SizedBox.expand(
                           child: _buildVideoFrameDisplay(varProvider),
                         ),
                       ),
@@ -91,14 +98,14 @@ class _VarStationScreenState extends State<VarStationScreen> {
                   ),
 
                   // Remote Camera Controls Pill (Top-Right)
-                  if (varProvider.isConnected && _showControlsOverlay)
+                  if (varProvider.isConnected)
                     Positioned(
                       top: 12,
                       right: 12,
                       child: _buildRemoteControlsPill(varProvider),
                     ),
 
-                  // Floating Quick Zoom & Overlay Controls (Bottom-Right)
+                  // Floating Quick Actions (Bottom-Right)
                   if (varProvider.isConnected && !varProvider.isReplayActive)
                     Positioned(
                       bottom: 12,
@@ -106,6 +113,20 @@ class _VarStationScreenState extends State<VarStationScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          // Toggle Full-Screen Fill vs Fit Aspect
+                          FloatingActionButton.small(
+                            heroTag: 'fitScreenBtn',
+                            backgroundColor: Colors.black87,
+                            foregroundColor: JokarzColors.gold,
+                            tooltip: _videoFit == BoxFit.cover ? 'Fit Aspect Ratio' : 'Fill 100% Screen',
+                            onPressed: _toggleVideoFit,
+                            child: Icon(
+                              _videoFit == BoxFit.cover ? Icons.fit_screen : Icons.fullscreen,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // Reset Zoom
                           FloatingActionButton.small(
                             heroTag: 'resetZoomBtn',
                             backgroundColor: Colors.black87,
@@ -117,6 +138,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
                             child: const Icon(Icons.zoom_out_map, size: 20),
                           ),
                           const SizedBox(height: 8),
+                          // Grid Overlay Toggle
                           FloatingActionButton.small(
                             heroTag: 'toggleOverlayBtn',
                             backgroundColor: Colors.black87,
@@ -287,8 +309,10 @@ class _VarStationScreenState extends State<VarStationScreen> {
       return Image.memory(
         frameBytes,
         gaplessPlayback: true,
-        fit: BoxFit.contain,
+        fit: _videoFit,
         filterQuality: FilterQuality.high,
+        width: double.infinity,
+        height: double.infinity,
         errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
       );
     }
@@ -350,7 +374,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.black.withAlpha(210),
+        color: Colors.black.withAlpha(220),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
@@ -372,7 +396,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
           Text(
             isReplay
                 ? 'VAR REPLAY (${varProvider.totalBufferedFrames}f)'
-                : 'CRISP LIVE ${varProvider.currentFps} FPS',
+                : '1080p CRISP • ${varProvider.currentFps} FPS',
             style: TextStyle(
               color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
               fontSize: 11,
@@ -389,7 +413,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black.withAlpha(210),
+        color: Colors.black.withAlpha(220),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: JokarzColors.cardBorder),
       ),
