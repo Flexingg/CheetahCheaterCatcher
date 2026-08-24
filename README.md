@@ -1,16 +1,15 @@
-# 🃏 Jokarz Plays — High-Roller Game Night VAR & Scoreboard
-
 <div align="center">
 
-[![Direct APK Download](https://img.shields.io/badge/⬇️%20DIRECT%20APK%20DOWNLOAD-v1.0.1%20Release-FFB300?style=for-the-badge&logo=android&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.1.apk)
+[![Direct Android APK Download](https://img.shields.io/badge/⬇️%20ANDROID%20APK-v1.0.1%20Release-FFB300?style=for-the-badge&logo=android&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.1.apk)
+[![Direct Windows App Download](https://img.shields.io/badge/⬇️%20WINDOWS%20APP-v1.0.1%20Release-00E676?style=for-the-badge&logo=windows&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-Windows-v1.0.1.zip)
 
 [![Flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
 [![Dart](https://img.shields.io/badge/Dart-3.8+-0175C2?logo=dart&logoColor=white)](https://dart.dev)
-[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20iOS%20%7C%20Web%20%7C%20Desktop-00E676)](#)
+[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20iOS%20%7C%20Windows%20%7C%20Web-00E676)](#)
 [![License](https://img.shields.io/badge/License-MIT-FFB300.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v1.0.1-FF3366.svg)](https://github.com/Flexingg/CheetahCheaterCatcher/releases/tag/v1.0.1)
 
-### 📥 **[Click Here to Download JokarzPlays-v1.0.1.apk](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.1.apk)**
+### 📥 **[Download Android APK (v1.0.1)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.1.apk)** | **[Download Windows App (v1.0.1 .zip)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-Windows-v1.0.1.zip)**
 
 *The ultimate dual-mode Video Assistant Referee (VAR), instant replay DVR, telestrator drawing suite, quick-type matrix scoreboard, and lifetime trophy room for game nights, poker tables, card tournaments, and board game enthusiasts.*
 
@@ -190,29 +189,49 @@ flutter run
 
 ---
 
-## 🔄 How to Update & Upgrade
+## 💡 Flutter vs. Dart — What's the Difference?
 
-### Updating Dependencies
+- **Dart**: The object-oriented, type-safe **programming language** created by Google (analogous to TypeScript, Python, or C#). It provides fast asynchronous I/O, isolates, sound null safety, and ahead-of-time (AOT) compilation to machine code.
+- **Flutter**: The cross-platform **UI framework and rendering engine** built with Dart. Flutter provides the reactive widget tree, Skia/Impeller hardware-accelerated canvas rendering, material theming, and multi-platform compilation.
+- **The Result**: A **single codebase** written in Dart that compiles to native binary executables for **Android, iOS, Windows, macOS, Linux, and Web (Wasm/CanvasKit)**!
+
+---
+
+## 💻 Multi-Platform Build Instructions (Windows & Web)
+
+### 1. 🪟 Windows Desktop Build
+Run or compile native 64-bit Windows executable (`.exe`):
 ```bash
-cd flutter_app
-flutter pub upgrade
-flutter pub outdated
+# Run locally on Windows Desktop
+flutter run -d windows
+
+# Build standalone Release bundle
+flutter build windows --release
+# Output: build/windows/x64/runner/Release/game_night_var.exe
 ```
 
-### Building Release Artifacts
-- **Android APK (Universal)**:
-  ```bash
-  flutter build apk --release
-  # Output: build/app/outputs/flutter-apk/app-release.apk
-  ```
-- **Android App Bundle (Google Play)**:
-  ```bash
-  flutter build appbundle --release
-  ```
-- **iOS App (Xcode / TestFlight)**:
-  ```bash
-  flutter build ipa --release
-  ```
+### 2. 🌐 Web Build (HTML5 / WebAssembly / CanvasKit)
+Deploy to any static web host, GitHub Pages, or local server:
+```bash
+# Run locally in Chrome / Edge
+flutter run -d chrome
+
+# Build optimized production web app
+flutter build web --release
+# Output: build/web/
+```
+
+### 3. 📱 Mobile Builds (Android & iOS)
+```bash
+# Android APK
+flutter build apk --release
+
+# Android App Bundle (Google Play)
+flutter build appbundle --release
+
+# iOS App Bundle (Xcode / TestFlight)
+flutter build ipa --release
+```
 
 ---
 
