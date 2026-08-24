@@ -18,7 +18,8 @@ class VarStationScreen extends StatefulWidget {
 
 class _VarStationScreenState extends State<VarStationScreen> {
   final TransformationController _transformController = TransformationController();
-  BoxFit _videoFit = BoxFit.cover; // Default to full screen edge-to-edge
+  BoxFit _videoFit = BoxFit.cover; // Default: 100% Full Screen Edge-to-Edge Fill
+  int _rotationQuarterTurns = 0; // Manual rotation support (0, 90, 180, 270 deg)
 
   @override
   void dispose() {
@@ -41,6 +42,12 @@ class _VarStationScreenState extends State<VarStationScreen> {
     });
   }
 
+  void _rotateFeed() {
+    setState(() {
+      _rotationQuarterTurns = (_rotationQuarterTurns + 1) % 4;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final varProvider = context.watch<VarReplayProvider>();
@@ -55,105 +62,127 @@ class _VarStationScreenState extends State<VarStationScreen> {
 
             // Video Player + Telestrator + Alignment Grid Viewport
             Expanded(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  // Full-Screen Edge-to-Edge Video Viewport with Pinch-To-Zoom (up to 10.0x) and Pan
-                  Positioned.fill(
-                    child: Container(
-                      color: Colors.black,
-                      child: InteractiveViewer(
-                        transformationController: _transformController,
-                        minScale: 1.0,
-                        maxScale: 10.0,
-                        panEnabled: !telestrator.isDrawingEnabled,
-                        scaleEnabled: !telestrator.isDrawingEnabled,
-                        child: SizedBox.expand(
-                          child: _buildVideoFrameDisplay(varProvider),
-                        ),
-                      ),
-                    ),
-                  ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final viewportW = constraints.maxWidth;
+                  final viewportH = constraints.maxHeight;
 
-                  // Tabletop Framing Alignment Grid Overlay
-                  if (varProvider.isAlignmentGridVisible && varProvider.isConnected)
-                    const Positioned.fill(
-                      child: IgnorePointer(
-                        child: CustomPaint(
-                          painter: _TableAlignmentGridPainter(),
-                        ),
-                      ),
-                    ),
-
-                  // Telestrator Drawing Layer
-                  const Positioned.fill(
-                    child: TelestratorCanvasWidget(),
-                  ),
-
-                  // Status HUD Overlay (Top-Left)
-                  Positioned(
-                    top: 12,
-                    left: 12,
-                    child: _buildHudBadge(varProvider),
-                  ),
-
-                  // Remote Camera Controls Pill (Top-Right)
-                  if (varProvider.isConnected)
-                    Positioned(
-                      top: 12,
-                      right: 12,
-                      child: _buildRemoteControlsPill(varProvider),
-                    ),
-
-                  // Floating Quick Actions (Bottom-Right)
-                  if (varProvider.isConnected && !varProvider.isReplayActive)
-                    Positioned(
-                      bottom: 12,
-                      right: 12,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          // Toggle Full-Screen Fill vs Fit Aspect
-                          FloatingActionButton.small(
-                            heroTag: 'fitScreenBtn',
-                            backgroundColor: Colors.black87,
-                            foregroundColor: JokarzColors.gold,
-                            tooltip: _videoFit == BoxFit.cover ? 'Fit Aspect Ratio' : 'Fill 100% Screen',
-                            onPressed: _toggleVideoFit,
-                            child: Icon(
-                              _videoFit == BoxFit.cover ? Icons.fit_screen : Icons.fullscreen,
-                              size: 20,
+                  return Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // Full-Screen Edge-to-Edge Video Viewport with Pinch-To-Zoom (up to 10.0x) and Pan
+                      Positioned.fill(
+                        child: Container(
+                          color: Colors.black,
+                          child: InteractiveViewer(
+                            transformationController: _transformController,
+                            minScale: 1.0,
+                            maxScale: 10.0,
+                            panEnabled: !telestrator.isDrawingEnabled,
+                            scaleEnabled: !telestrator.isDrawingEnabled,
+                            child: SizedBox(
+                              width: viewportW,
+                              height: viewportH,
+                              child: RotatedBox(
+                                quarterTurns: _rotationQuarterTurns,
+                                child: _buildVideoFrameDisplay(varProvider, viewportW, viewportH),
+                              ),
                             ),
                           ),
-                          const SizedBox(height: 8),
-                          // Reset Zoom
-                          FloatingActionButton.small(
-                            heroTag: 'resetZoomBtn',
-                            backgroundColor: Colors.black87,
-                            foregroundColor: JokarzColors.gold,
-                            tooltip: 'Reset Viewport Zoom',
-                            onPressed: () {
-                              _transformController.value = Matrix4.identity();
-                            },
-                            child: const Icon(Icons.zoom_out_map, size: 20),
-                          ),
-                          const SizedBox(height: 8),
-                          // Grid Overlay Toggle
-                          FloatingActionButton.small(
-                            heroTag: 'toggleOverlayBtn',
-                            backgroundColor: Colors.black87,
-                            foregroundColor: JokarzColors.gold,
-                            tooltip: 'Toggle Table Grid',
-                            onPressed: varProvider.toggleAlignmentGrid,
-                            child: Icon(
-                              varProvider.isAlignmentGridVisible ? Icons.grid_on : Icons.grid_off,
-                              size: 20,
+                        ),
+                      ),
+
+                      // Tabletop Framing Alignment Grid Overlay
+                      if (varProvider.isAlignmentGridVisible && varProvider.isConnected)
+                        const Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _TableAlignmentGridPainter(),
                             ),
                           ),
-                        ],
+                        ),
+
+                      // Telestrator Drawing Layer
+                      const Positioned.fill(
+                        child: TelestratorCanvasWidget(),
                       ),
-                    ),
-                ],
+
+                      // Status HUD Overlay (Top-Left)
+                      Positioned(
+                        top: 12,
+                        left: 12,
+                        child: _buildHudBadge(varProvider),
+                      ),
+
+                      // Remote Camera Controls Pill (Top-Right)
+                      if (varProvider.isConnected)
+                        Positioned(
+                          top: 12,
+                          right: 12,
+                          child: _buildRemoteControlsPill(varProvider),
+                        ),
+
+                      // Floating Quick Action Buttons (Bottom-Right)
+                      if (varProvider.isConnected && !varProvider.isReplayActive)
+                        Positioned(
+                          bottom: 12,
+                          right: 12,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Toggle Full-Screen Fill vs Fit Aspect
+                              FloatingActionButton.small(
+                                heroTag: 'fitScreenBtn',
+                                backgroundColor: Colors.black87,
+                                foregroundColor: JokarzColors.gold,
+                                tooltip: _videoFit == BoxFit.cover ? 'Fit Aspect Ratio' : 'Fill 100% Screen',
+                                onPressed: _toggleVideoFit,
+                                child: Icon(
+                                  _videoFit == BoxFit.cover ? Icons.fit_screen : Icons.fullscreen,
+                                  size: 20,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              // Rotate Feed 90 Deg
+                              FloatingActionButton.small(
+                                heroTag: 'rotateFeedBtn',
+                                backgroundColor: Colors.black87,
+                                foregroundColor: JokarzColors.gold,
+                                tooltip: 'Rotate Feed 90°',
+                                onPressed: _rotateFeed,
+                                child: const Icon(Icons.rotate_90_degrees_cw, size: 20),
+                              ),
+                              const SizedBox(height: 8),
+                              // Reset Zoom
+                              FloatingActionButton.small(
+                                heroTag: 'resetZoomBtn',
+                                backgroundColor: Colors.black87,
+                                foregroundColor: JokarzColors.gold,
+                                tooltip: 'Reset Viewport Zoom',
+                                onPressed: () {
+                                  _transformController.value = Matrix4.identity();
+                                },
+                                child: const Icon(Icons.zoom_out_map, size: 20),
+                              ),
+                              const SizedBox(height: 8),
+                              // Grid Overlay Toggle
+                              FloatingActionButton.small(
+                                heroTag: 'toggleOverlayBtn',
+                                backgroundColor: Colors.black87,
+                                foregroundColor: JokarzColors.gold,
+                                tooltip: 'Toggle Table Grid',
+                                onPressed: varProvider.toggleAlignmentGrid,
+                                child: Icon(
+                                  varProvider.isAlignmentGridVisible ? Icons.grid_on : Icons.grid_off,
+                                  size: 20,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  );
+                },
               ),
             ),
 
@@ -302,18 +331,28 @@ class _VarStationScreenState extends State<VarStationScreen> {
     );
   }
 
-  Widget _buildVideoFrameDisplay(VarReplayProvider varProvider) {
+  Widget _buildVideoFrameDisplay(
+    VarReplayProvider varProvider,
+    double viewportW,
+    double viewportH,
+  ) {
     final frameBytes = varProvider.currentFrameBytes;
 
     if (frameBytes != null && frameBytes.isNotEmpty) {
-      return Image.memory(
-        frameBytes,
-        gaplessPlayback: true,
+      return FittedBox(
         fit: _videoFit,
-        filterQuality: FilterQuality.high,
-        width: double.infinity,
-        height: double.infinity,
-        errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
+        clipBehavior: Clip.antiAlias,
+        child: SizedBox(
+          width: viewportW,
+          height: viewportH,
+          child: Image.memory(
+            frameBytes,
+            gaplessPlayback: true,
+            fit: _videoFit,
+            filterQuality: FilterQuality.high,
+            errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
+          ),
+        ),
       );
     }
 
@@ -396,7 +435,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
           Text(
             isReplay
                 ? 'VAR REPLAY (${varProvider.totalBufferedFrames}f)'
-                : '1080p CRISP • ${varProvider.currentFps} FPS',
+                : '1080p FULL SCREEN • ${varProvider.currentFps} FPS',
             style: TextStyle(
               color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
               fontSize: 11,

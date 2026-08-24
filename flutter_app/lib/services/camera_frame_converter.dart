@@ -8,6 +8,7 @@ class CameraFrameConverter {
     CameraImage cameraImage, {
     int quality = 85,
     int strideStep = 1,
+    int rotationAngle = 0,
     int? targetWidth,
     int? targetHeight,
   }) {
@@ -25,6 +26,11 @@ class CameraFrameConverter {
       }
 
       if (converted == null) return null;
+
+      // Rotate image upright if sensor has rotation angle (e.g. 90 on Android back camera)
+      if (rotationAngle != 0) {
+        converted = img.copyRotate(converted, angle: rotationAngle);
+      }
 
       // Optional resize if requested
       if (targetWidth != null && targetHeight != null && (converted.width > targetWidth || converted.height > targetHeight)) {

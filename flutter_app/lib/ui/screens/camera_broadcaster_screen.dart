@@ -189,6 +189,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     }
   }
 
+  int _sensorOrientation = 90;
+
   Future<void> _startCameraInstance(CameraDescription description) async {
     try {
       if (_cameraController != null) {
@@ -197,6 +199,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       }
 
       _isCameraInitialized = false;
+      _sensorOrientation = description.sensorOrientation;
       if (mounted) setState(() {});
 
       final controller = CameraController(
@@ -243,11 +246,12 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     _lastFrameTime = now;
 
     try {
-      // Crisp 1:1 pixel resolution (strideStep = 1) and 80% JPEG quality for razor-sharp replay cards
+      // Crisp 1:1 pixel resolution (strideStep = 1) and rotated upright
       final jpeg = CameraFrameConverter.convertCameraImageToJpeg(
         image,
-        quality: _qualityPreset == VideoQualityPreset.ultra4k1080p ? 82 : 72,
+        quality: _qualityPreset == VideoQualityPreset.ultra4k1080p ? 85 : 75,
         strideStep: 1, // Full 1:1 crisp pixel resolution
+        rotationAngle: _sensorOrientation,
       );
 
       if (jpeg != null && jpeg.isNotEmpty) {
