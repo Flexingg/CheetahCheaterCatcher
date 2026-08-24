@@ -25,7 +25,7 @@ class TelestratorCanvasWidget extends StatelessWidget {
               onPanEnd: (_) => telestrator.onPanEnd(),
               child: CustomPaint(
                 painter: _TelestratorPainter(
-                  paths: telestrator.paths,
+                  paths: telestrator.visiblePaths,
                   activePath: telestrator.currentDrawingPath,
                 ),
                 child: const SizedBox.expand(),
@@ -103,6 +103,15 @@ class TelestratorCanvasWidget extends StatelessWidget {
                 onTap: () => telestrator.setTool(TelestratorTool.highlighter),
               ),
               const Spacer(),
+
+              // Feature #5: Slow Draw / Animate Markup Button
+              IconButton(
+                icon: const Icon(Icons.auto_awesome, size: 20),
+                color: telestrator.paths.isNotEmpty ? JokarzColors.gold : JokarzColors.textMuted,
+                onPressed: telestrator.paths.isNotEmpty ? telestrator.playSlowDrawAnimation : null,
+                tooltip: 'Slow Draw / Animate Markup (#5)',
+                visualDensity: VisualDensity.compact,
+              ),
 
               // Undo
               IconButton(

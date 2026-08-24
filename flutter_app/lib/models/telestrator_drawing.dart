@@ -10,9 +10,9 @@ enum TelestratorTool {
 
 class TelestratorPoint {
   final Offset offset;
-  final double pressure;
+  final Duration relativeTime;
 
-  TelestratorPoint(this.offset, {this.pressure = 1.0});
+  TelestratorPoint(this.offset, {this.relativeTime = Duration.zero});
 }
 
 class TelestratorPath {
@@ -21,6 +21,8 @@ class TelestratorPath {
   final Color color;
   final double strokeWidth;
   final List<Offset> points;
+  final List<Duration> pointOffsets;
+  final int? frameIndex;
   final bool isClosed;
 
   TelestratorPath({
@@ -29,8 +31,10 @@ class TelestratorPath {
     required this.color,
     required this.strokeWidth,
     required this.points,
+    List<Duration>? pointOffsets,
+    this.frameIndex,
     this.isClosed = false,
-  });
+  }) : pointOffsets = pointOffsets ?? List.filled(points.length, Duration.zero);
 
   TelestratorPath copyWith({
     String? id,
@@ -38,6 +42,8 @@ class TelestratorPath {
     Color? color,
     double? strokeWidth,
     List<Offset>? points,
+    List<Duration>? pointOffsets,
+    int? frameIndex,
     bool? isClosed,
   }) {
     return TelestratorPath(
@@ -46,7 +52,21 @@ class TelestratorPath {
       color: color ?? this.color,
       strokeWidth: strokeWidth ?? this.strokeWidth,
       points: points ?? this.points,
+      pointOffsets: pointOffsets ?? this.pointOffsets,
+      frameIndex: frameIndex ?? this.frameIndex,
       isClosed: isClosed ?? this.isClosed,
+    );
+  }
+
+  /// Returns a sub-path trimmed to a progressive fraction (0.0 to 1.0) for Slow Draw animation
+  TelestratorPath trimProgress(double progress) {
+    if (points.isEmpty || progress >= 1.0) return this;
+    if (progress <= 0.0) return copyWith(points: [], pointOffsets: []);
+
+    final count = (points.length * progress).ceil().clamp(1, points.length);
+    return copyWith(
+      points: points.sublist(0, count),
+      pointOffsets: pointOffsets.length >= count ? pointOffsets.sublist(0, count) : [],
     );
   }
 }

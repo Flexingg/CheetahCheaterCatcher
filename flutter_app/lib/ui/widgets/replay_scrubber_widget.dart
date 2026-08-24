@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../constants/app_constants.dart';
 import '../../constants/app_theme.dart';
+import '../../state/telestrator_provider.dart';
 import '../../state/var_replay_provider.dart';
 
 class ReplayScrubberWidget extends StatelessWidget {
@@ -127,7 +128,23 @@ class ReplayScrubberWidget extends StatelessWidget {
                 onPressed: () => varProvider.stepForward(1),
               ),
 
-              const SizedBox(width: 8),
+              const SizedBox(width: 4),
+
+              // Feature #5: Animate / Slow Draw Markup
+              Builder(
+                builder: (context) {
+                  final telestrator = context.watch<TelestratorProvider>();
+                  return IconButton(
+                    icon: const Icon(Icons.auto_awesome, size: 20),
+                    color: telestrator.paths.isNotEmpty ? JokarzColors.gold : JokarzColors.textMuted,
+                    tooltip: 'Slow Draw / Animate Markup (#5)',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: telestrator.paths.isNotEmpty ? telestrator.playSlowDrawAnimation : null,
+                  );
+                },
+              ),
+
+              const SizedBox(width: 4),
 
               // Speed Selector Pills
               Expanded(
