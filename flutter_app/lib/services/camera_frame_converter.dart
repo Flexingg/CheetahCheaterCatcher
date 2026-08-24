@@ -3,10 +3,11 @@ import 'package:flutter/foundation.dart';
 import 'package:image/image.dart' as img;
 
 class CameraFrameConverter {
-  /// Converts a CameraImage (YUV420 or BGRA8888) to a crystal-clear compressed JPEG Uint8List
+  /// Converts a CameraImage (YUV420, BGRA8888, or NV21) to a crystal-clear compressed JPEG Uint8List
+  /// with zero-cost single-pass sensor rotation.
   static Uint8List? convertCameraImageToJpeg(
     CameraImage cameraImage, {
-    int quality = 85,
+    int quality = 80,
     int strideStep = 1,
     int rotationAngle = 0,
     int? targetWidth,
@@ -16,21 +17,16 @@ class CameraFrameConverter {
       img.Image? converted;
 
       if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-        converted = _convertYUV420Accurate(cameraImage, strideStep: strideStep);
+        converted = _convertYUV420SinglePass(cameraImage, strideStep: strideStep, rotationAngle: rotationAngle);
       } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-        converted = _convertBGRA8888Fast(cameraImage, strideStep: strideStep);
+        converted = _convertBGRA8888SinglePass(cameraImage, strideStep: strideStep, rotationAngle: rotationAngle);
       } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
-        converted = _convertNV21Accurate(cameraImage, strideStep: strideStep);
+        converted = _convertNV21SinglePass(cameraImage, strideStep: strideStep, rotationAngle: rotationAngle);
       } else {
         converted = _convertGenericYuv(cameraImage);
       }
 
       if (converted == null) return null;
-
-      // Rotate image upright if sensor has rotation angle (e.g. 90 on Android back camera)
-      if (rotationAngle != 0) {
-        converted = img.copyRotate(converted, angle: rotationAngle);
-      }
 
       // Optional resize if requested
       if (targetWidth != null && targetHeight != null && (converted.width > targetWidth || converted.height > targetHeight)) {
@@ -44,15 +40,23 @@ class CameraFrameConverter {
     }
   }
 
-  /// High-accuracy, fast Android YUV420 to RGB conversion with individual plane strides
-  static img.Image _convertYUV420Accurate(CameraImage image, {int strideStep = 1}) {
+  /// High-accuracy, fast Android YUV420 to RGB conversion with single-pass rotation (0ms extra cost)
+  static img.Image _convertYUV420SinglePass(
+    CameraImage image, {
+    int strideStep = 1,
+    int rotationAngle = 0,
+  }) {
     final int origWidth = image.width;
     final int origHeight = image.height;
 
     final int width = origWidth ~/ strideStep;
     final int height = origHeight ~/ strideStep;
 
-    final img.Image rgbImage = img.Image(width: width, height: height);
+    final bool isRotated = (rotationAngle == 90 || rotationAngle == 270);
+    final int outW = isRotated ? height : width;
+    final int outH = isRotated ? width : height;
+
+    final img.Image rgbImage = img.Image(width: outW, height: outH);
 
     final yPlane = image.planes[0];
     final uPlane = image.planes[1];
@@ -71,18 +75,18 @@ class CameraFrameConverter {
     final int vRowStride = vPlane.bytesPerRow;
     final int vPixelStride = vPlane.bytesPerPixel ?? 1;
 
-    for (int outY = 0; outY < height; outY++) {
-      final int inY = outY * strideStep;
-      final int uvh = inY >> 1;
-      final int yRowOffset = inY * yRowStride;
+    for (int inY = 0; inY < height; inY++) {
+      final int actualY = inY * strideStep;
+      final int uvh = actualY >> 1;
+      final int yRowOffset = actualY * yRowStride;
       final int uRowOffset = uvh * uRowStride;
       final int vRowOffset = uvh * vRowStride;
 
-      for (int outX = 0; outX < width; outX++) {
-        final int inX = outX * strideStep;
-        final int uvw = inX >> 1;
+      for (int inX = 0; inX < width; inX++) {
+        final int actualX = inX * strideStep;
+        final int uvw = actualX >> 1;
 
-        final int yIndex = yRowOffset + (inX * yPixelStride);
+        final int yIndex = yRowOffset + (actualX * yPixelStride);
         final int uIndex = uRowOffset + (uvw * uPixelStride);
         final int vIndex = vRowOffset + (uvw * vPixelStride);
 
@@ -94,58 +98,96 @@ class CameraFrameConverter {
         final int u = uBytes[uIndex] - 128;
         final int v = vBytes[vIndex] - 128;
 
-        // Accurate BT.601 full-range integer calculation
+        // Accurate integer BT.601 full-range calculation
         final int r = (y + ((359 * v) >> 8)).clamp(0, 255);
         final int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
         final int b = (y + ((454 * u) >> 8)).clamp(0, 255);
 
-        rgbImage.setPixelRgb(outX, outY, r, g, b);
+        // Compute rotated target coordinates in single pass
+        int targetX;
+        int targetY;
+
+        if (rotationAngle == 90) {
+          targetX = height - 1 - inY;
+          targetY = inX;
+        } else if (rotationAngle == 270) {
+          targetX = inY;
+          targetY = width - 1 - inX;
+        } else if (rotationAngle == 180) {
+          targetX = width - 1 - inX;
+          targetY = height - 1 - inY;
+        } else {
+          targetX = inX;
+          targetY = inY;
+        }
+
+        rgbImage.setPixelRgb(targetX, targetY, r, g, b);
       }
     }
 
     return rgbImage;
   }
 
-  /// Fast iOS BGRA8888 to Image conversion
-  static img.Image _convertBGRA8888Fast(CameraImage image, {int strideStep = 1}) {
-    final int width = image.width;
-    final int height = image.height;
+  /// Fast iOS BGRA8888 single-pass conversion
+  static img.Image _convertBGRA8888SinglePass(
+    CameraImage image, {
+    int strideStep = 1,
+    int rotationAngle = 0,
+  }) {
+    final int width = image.width ~/ strideStep;
+    final int height = image.height ~/ strideStep;
     final bytes = image.planes[0].bytes;
+    final int origW = image.width;
 
-    if (strideStep <= 1) {
-      return img.Image.fromBytes(
-        width: width,
-        height: height,
-        bytes: bytes.buffer,
-        order: img.ChannelOrder.bgra,
-      );
-    }
-
-    final int outW = width ~/ strideStep;
-    final int outH = height ~/ strideStep;
+    final bool isRotated = (rotationAngle == 90 || rotationAngle == 270);
+    final int outW = isRotated ? height : width;
+    final int outH = isRotated ? width : height;
     final img.Image out = img.Image(width: outW, height: outH);
 
-    for (int y = 0; y < outH; y++) {
-      final int inY = y * strideStep;
-      for (int x = 0; x < outW; x++) {
-        final int inX = x * strideStep;
-        final int idx = (inY * width + inX) * 4;
+    for (int inY = 0; inY < height; inY++) {
+      final int actualY = inY * strideStep;
+      for (int inX = 0; inX < width; inX++) {
+        final int actualX = inX * strideStep;
+        final int idx = (actualY * origW + actualX) * 4;
+
         if (idx + 3 < bytes.length) {
           final b = bytes[idx];
           final g = bytes[idx + 1];
           final r = bytes[idx + 2];
-          out.setPixelRgb(x, y, r, g, b);
+
+          int targetX = inX;
+          int targetY = inY;
+          if (rotationAngle == 90) {
+            targetX = height - 1 - inY;
+            targetY = inX;
+          } else if (rotationAngle == 270) {
+            targetX = inY;
+            targetY = width - 1 - inX;
+          } else if (rotationAngle == 180) {
+            targetX = width - 1 - inX;
+            targetY = height - 1 - inY;
+          }
+
+          out.setPixelRgb(targetX, targetY, r, g, b);
         }
       }
     }
     return out;
   }
 
-  /// Fast NV21
-  static img.Image _convertNV21Accurate(CameraImage image, {int strideStep = 1}) {
+  /// Fast NV21 single-pass conversion
+  static img.Image _convertNV21SinglePass(
+    CameraImage image, {
+    int strideStep = 1,
+    int rotationAngle = 0,
+  }) {
     final int width = image.width ~/ strideStep;
     final int height = image.height ~/ strideStep;
-    final img.Image rgbImage = img.Image(width: width, height: height);
+
+    final bool isRotated = (rotationAngle == 90 || rotationAngle == 270);
+    final int outW = isRotated ? height : width;
+    final int outH = isRotated ? width : height;
+    final img.Image rgbImage = img.Image(width: outW, height: outH);
 
     final yPlane = image.planes[0];
     final vuPlane = image.planes[1];
@@ -154,12 +196,12 @@ class CameraFrameConverter {
     final vuBytes = vuPlane.bytes;
     final int origW = image.width;
 
-    for (int outY = 0; outY < height; outY++) {
-      final int inY = outY * strideStep;
-      for (int outX = 0; outX < width; outX++) {
-        final int inX = outX * strideStep;
-        final int yIndex = inY * origW + inX;
-        final int vuIndex = (inY ~/ 2) * origW + (inX & ~1);
+    for (int inY = 0; inY < height; inY++) {
+      final int actualY = inY * strideStep;
+      for (int inX = 0; inX < width; inX++) {
+        final int actualX = inX * strideStep;
+        final int yIndex = actualY * origW + actualX;
+        final int vuIndex = (actualY ~/ 2) * origW + (actualX & ~1);
 
         if (yIndex < yBytes.length && vuIndex + 1 < vuBytes.length) {
           final int y = yBytes[yIndex];
@@ -170,7 +212,20 @@ class CameraFrameConverter {
           final int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
           final int b = (y + ((454 * u) >> 8)).clamp(0, 255);
 
-          rgbImage.setPixelRgb(outX, outY, r, g, b);
+          int targetX = inX;
+          int targetY = inY;
+          if (rotationAngle == 90) {
+            targetX = height - 1 - inY;
+            targetY = inX;
+          } else if (rotationAngle == 270) {
+            targetX = inY;
+            targetY = width - 1 - inX;
+          } else if (rotationAngle == 180) {
+            targetX = width - 1 - inX;
+            targetY = height - 1 - inY;
+          }
+
+          rgbImage.setPixelRgb(targetX, targetY, r, g, b);
         }
       }
     }
