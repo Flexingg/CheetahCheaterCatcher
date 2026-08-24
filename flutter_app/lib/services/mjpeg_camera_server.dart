@@ -10,13 +10,13 @@ class MjpegCameraServer {
   HttpServer? _httpServer;
   HttpServer? _wsControlServer;
   final List<HttpResponse> _mjpegClients = [];
-  final List<WebSocket> _wsClients = [];
+  final List<WebSocket> _binaryWsClients = [];
+  final List<WebSocket> _wsControlClients = [];
 
   Uint8List? _latestFrame;
   int _fpsCounter = 0;
   int _currentFps = 0;
   Timer? _fpsTimer;
-  Timer? _simTimer;
 
   bool _isTorchOn = false;
   double _zoomLevel = 1.0;
@@ -25,20 +25,21 @@ class MjpegCameraServer {
   RemoteCommandHandler? onRemoteCommand;
 
   bool get isRunning => _httpServer != null;
-  int get activeViewers => _mjpegClients.length + _wsClients.length;
+  int get activeViewers => _mjpegClients.length + _binaryWsClients.length;
   int get currentFps => _currentFps;
   bool get isTorchOn => _isTorchOn;
   double get zoomLevel => _zoomLevel;
   bool get isFrontCamera => _isFrontCamera;
+  Uint8List? get latestFrame => _latestFrame;
 
-  /// Start HTTP MJPEG and WebSocket server
+  /// Start HTTP MJPEG and WebSocket servers
   Future<bool> startServer({
     int streamPort = AppConstants.defaultHttpPort,
     int controlPort = AppConstants.defaultControlPort,
   }) async {
     stopServer();
     try {
-      // 1. MJPEG Stream Server
+      // 1. Stream Server (handles both HTTP MJPEG & binary WebSockets /ws/live)
       _httpServer = await HttpServer.bind(
         InternetAddress.anyIPv4,
         streamPort,
@@ -46,13 +47,13 @@ class MjpegCameraServer {
       );
       _httpServer?.listen(_handleHttpRequest);
 
-      // 2. WebSocket Control Server
+      // 2. Control Server (handles remote torch, zoom, alerts)
       _wsControlServer = await HttpServer.bind(
         InternetAddress.anyIPv4,
         controlPort,
         shared: true,
       );
-      _wsControlServer?.listen(_handleWsRequest);
+      _wsControlServer?.listen(_handleWsControlRequest);
 
       // FPS tracking
       _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -84,8 +85,39 @@ class MjpegCameraServer {
       return;
     }
 
+    // Binary WebSocket Live Stream (Ultra-low latency <100ms)
+    if (path == '/ws/live' || path == '/ws/stream' || WebSocketTransformer.isUpgradeRequest(request)) {
+      if (WebSocketTransformer.isUpgradeRequest(request)) {
+        try {
+          final ws = await WebSocketTransformer.upgrade(request);
+          _binaryWsClients.add(ws);
+          debugPrint('[CameraServer] Binary WebSocket client connected (Total: ${_binaryWsClients.length})');
+
+          // Send immediate latest frame if available
+          if (_latestFrame != null) {
+            ws.add(_latestFrame!);
+          }
+
+          ws.listen(
+            (data) {},
+            onDone: () {
+              _binaryWsClients.remove(ws);
+              debugPrint('[CameraServer] Binary WS client disconnected');
+            },
+            onError: (_) {
+              _binaryWsClients.remove(ws);
+            },
+            cancelOnError: true,
+          );
+          return;
+        } catch (e) {
+          debugPrint('WS Upgrade error: $e');
+        }
+      }
+    }
+
     if (path == '/live') {
-      // MJPEG Multipart stream
+      // Standard HTTP Multipart MJPEG stream
       final response = request.response;
       response.statusCode = HttpStatus.ok;
       response.headers.set(
@@ -132,31 +164,33 @@ class MjpegCameraServer {
     }
   }
 
-  void _handleWsRequest(HttpRequest request) async {
+  void _handleWsControlRequest(HttpRequest request) async {
     if (WebSocketTransformer.isUpgradeRequest(request)) {
-      final ws = await WebSocketTransformer.upgrade(request);
-      _wsClients.add(ws);
+      try {
+        final ws = await WebSocketTransformer.upgrade(request);
+        _wsControlClients.add(ws);
 
-      ws.listen((data) {
-        if (data is String) {
-          try {
-            final msg = jsonDecode(data) as Map<String, dynamic>;
-            final action = msg['action'] as String?;
-            final value = msg['value'];
+        ws.listen((data) {
+          if (data is String) {
+            try {
+              final msg = jsonDecode(data) as Map<String, dynamic>;
+              final action = msg['action'] as String?;
+              final value = msg['value'];
 
-            if (action != null) {
-              _processRemoteAction(action, value);
-              onRemoteCommand?.call(action, value);
+              if (action != null) {
+                _processRemoteAction(action, value);
+                onRemoteCommand?.call(action, value);
+              }
+            } catch (e) {
+              debugPrint('Error parsing WS message: $e');
             }
-          } catch (e) {
-            debugPrint('Error parsing WS message: $e');
           }
-        }
-      }, onDone: () {
-        _wsClients.remove(ws);
-      }, onError: (_) {
-        _wsClients.remove(ws);
-      });
+        }, onDone: () {
+          _wsControlClients.remove(ws);
+        }, onError: (_) {
+          _wsControlClients.remove(ws);
+        });
+      } catch (_) {}
     }
   }
 
@@ -186,61 +220,62 @@ class MjpegCameraServer {
       'timestamp': DateTime.now().toIso8601String(),
     });
 
-    for (final ws in List<WebSocket>.from(_wsClients)) {
+    for (final ws in List<WebSocket>.from(_wsControlClients)) {
       try {
         ws.add(payload);
       } catch (_) {}
     }
   }
 
-  /// Ingests a new JPEG frame and distributes to all connected MJPEG and WS clients
+  /// Ingests a new camera JPEG frame and broadcasts to all connected binary WS & HTTP clients
   void injectFrame(Uint8List jpegBytes) {
     _latestFrame = jpegBytes;
     _fpsCounter++;
 
-    if (_mjpegClients.isEmpty) return;
-
-    final header = utf8.encode(
-      '--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegBytes.length}\r\n\r\n',
-    );
-    final footer = utf8.encode('\r\n');
-
-    final deadClients = <HttpResponse>[];
-    for (final client in _mjpegClients) {
-      try {
-        client.add(header);
-        client.add(jpegBytes);
-        client.add(footer);
-      } catch (e) {
-        deadClients.add(client);
+    // 1. Binary WebSockets (Ultra-fast direct dispatch)
+    if (_binaryWsClients.isNotEmpty) {
+      final deadWs = <WebSocket>[];
+      for (final ws in _binaryWsClients) {
+        try {
+          ws.add(jpegBytes);
+        } catch (e) {
+          deadWs.add(ws);
+        }
+      }
+      if (deadWs.isNotEmpty) {
+        for (final dead in deadWs) {
+          _binaryWsClients.remove(dead);
+        }
       }
     }
 
-    if (deadClients.isNotEmpty) {
-      for (final dead in deadClients) {
-        _mjpegClients.remove(dead);
+    // 2. HTTP Multipart MJPEG stream
+    if (_mjpegClients.isNotEmpty) {
+      final header = utf8.encode(
+        '--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpegBytes.length}\r\n\r\n',
+      );
+      final footer = utf8.encode('\r\n');
+
+      final deadClients = <HttpResponse>[];
+      for (final client in _mjpegClients) {
+        try {
+          client.add(header);
+          client.add(jpegBytes);
+          client.add(footer);
+        } catch (e) {
+          deadClients.add(client);
+        }
+      }
+
+      if (deadClients.isNotEmpty) {
+        for (final dead in deadClients) {
+          _mjpegClients.remove(dead);
+        }
       }
     }
-  }
-
-  /// Start animated high-roller poker table simulator stream (useful for simulator & testing)
-  void startSimulatorStream() {
-    stopSimulatorStream();
-    int frameNum = 0;
-    _simTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      frameNum++;
-      final frame = _generatePokerTestPatternFrame(frameNum);
-      injectFrame(frame);
-    });
-  }
-
-  void stopSimulatorStream() {
-    _simTimer?.cancel();
-    _simTimer = null;
   }
 
   void stopServer() {
-    stopSimulatorStream();
     _fpsTimer?.cancel();
     _fpsTimer = null;
 
@@ -251,40 +286,24 @@ class MjpegCameraServer {
     }
     _mjpegClients.clear();
 
-    for (final ws in _wsClients) {
+    for (final ws in _binaryWsClients) {
       try {
         ws.close();
       } catch (_) {}
     }
-    _wsClients.clear();
+    _binaryWsClients.clear();
+
+    for (final ws in _wsControlClients) {
+      try {
+        ws.close();
+      } catch (_) {}
+    }
+    _wsControlClients.clear();
 
     _httpServer?.close(force: true);
     _httpServer = null;
 
     _wsControlServer?.close(force: true);
     _wsControlServer = null;
-  }
-
-  /// Generates a valid JPEG frame representing a high-roller poker table with animated cards & chips
-  Uint8List _generatePokerTestPatternFrame(int step) {
-    // Minimal valid JPEG binary generator with dynamic test markers
-    return _buildSampleMjpegCardFrame(step);
-  }
-
-  static final List<int> _fallbackJpegHeader = [
-    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x48,
-    0x00, 0x48, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08,
-    0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
-    0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20, 0x24, 0x2E, 0x27, 0x20,
-    0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29, 0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27,
-    0x39, 0x3D, 0x38, 0x32, 0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x40,
-    0x00, 0x40, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00, 0x01, 0x05, 0x01, 0x01,
-    0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
-    0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F,
-    0x00, 0xD2, 0xCF, 0x20, 0xFF, 0xD9
-  ];
-
-  static Uint8List _buildSampleMjpegCardFrame(int step) {
-    return Uint8List.fromList(_fallbackJpegHeader);
   }
 }

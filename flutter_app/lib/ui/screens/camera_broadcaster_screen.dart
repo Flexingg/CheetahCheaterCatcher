@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../constants/app_constants.dart';
 import '../../constants/app_theme.dart';
+import '../../services/camera_frame_converter.dart';
 import '../../services/mjpeg_camera_server.dart';
 import '../../services/network_discovery_service.dart';
 import '../../services/sound_effects_service.dart';
@@ -17,9 +19,16 @@ class CameraBroadcasterScreen extends StatefulWidget {
   State<CameraBroadcasterScreen> createState() => _CameraBroadcasterScreenState();
 }
 
-class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
+class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with WidgetsBindingObserver {
   final MjpegCameraServer _server = MjpegCameraServer();
   final NetworkDiscoveryService _discovery = NetworkDiscoveryService();
+
+  List<CameraDescription> _availableCameras = [];
+  CameraController? _cameraController;
+  int _selectedCameraIndex = 0;
+  bool _isCameraInitialized = false;
+  bool _isProcessingFrame = false;
+  DateTime _lastFrameTime = DateTime.now();
 
   List<String> _localIps = [];
   bool _isServerRunning = false;
@@ -27,15 +36,21 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
   Timer? _durationTimer;
   Timer? _uiRefreshTimer;
 
-  bool _isSimulatorMode = true; // Default simulator frames ready on startup
   bool _torchOn = false;
   double _zoom = 1.0;
-  bool _frontCam = false;
+  double _minZoom = 1.0;
+  double _maxZoom = 4.0;
 
   @override
   void initState() {
     super.initState();
-    _initBroadcasting();
+    WidgetsBinding.instance.addObserver(this);
+    _initAll();
+  }
+
+  Future<void> _initAll() async {
+    await _initBroadcasting();
+    await _initCamera();
   }
 
   Future<void> _initBroadcasting() async {
@@ -47,9 +62,6 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
     final success = await _server.startServer();
     if (success) {
       _isServerRunning = true;
-      if (_isSimulatorMode) {
-        _server.startSimulatorStream();
-      }
 
       await _discovery.startBroadcasting(
         deviceName: 'Jokarz Eye (${_localIps.first})',
@@ -58,32 +70,153 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
       );
 
       _server.onRemoteCommand = (action, value) {
-        setState(() {
-          if (action == 'torch' && value is bool) _torchOn = value;
-          if (action == 'zoom' && value is num) _zoom = value.toDouble();
-          if (action == 'flip_camera') _frontCam = !_frontCam;
-          if (action == 'sound_alert') {
-            SoundEffectsService.playVarWhistle();
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('🚨 REMOTE VAR REFEREE WHISTLE TRIGGERED!'),
-                backgroundColor: JokarzColors.crimsonDark,
-                duration: Duration(seconds: 2),
-              ),
-            );
-          }
-        });
+        if (!mounted) return;
+        if (action == 'torch' && value is bool) _setTorch(value);
+        if (action == 'zoom' && value is num) _setZoom(value.toDouble());
+        if (action == 'flip_camera') _flipCamera();
+        if (action == 'sound_alert') {
+          SoundEffectsService.playVarWhistle();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('🚨 REMOTE VAR REFEREE WHISTLE TRIGGERED!'),
+              backgroundColor: JokarzColors.crimsonDark,
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
       };
 
+      _durationTimer?.cancel();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        setState(() {
-          _secondsStreaming++;
-        });
+        if (mounted) {
+          setState(() {
+            _secondsStreaming++;
+          });
+        }
       });
 
+      _uiRefreshTimer?.cancel();
       _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
         if (mounted) setState(() {});
       });
+    }
+  }
+
+  Future<void> _initCamera() async {
+    try {
+      _availableCameras = await availableCameras();
+      if (_availableCameras.isEmpty) {
+        debugPrint('No cameras available on this device');
+        return;
+      }
+
+      // Default to back camera
+      _selectedCameraIndex = 0;
+      for (int i = 0; i < _availableCameras.length; i++) {
+        if (_availableCameras[i].lensDirection == CameraLensDirection.back) {
+          _selectedCameraIndex = i;
+          break;
+        }
+      }
+
+      await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+    } catch (e) {
+      debugPrint('Error initializing camera: $e');
+    }
+  }
+
+  Future<void> _startCameraInstance(CameraDescription description) async {
+    await _cameraController?.dispose();
+    _cameraController = null;
+    _isCameraInitialized = false;
+    if (mounted) setState(() {});
+
+    final controller = CameraController(
+      description,
+      ResolutionPreset.medium, // 720p/480p is ideal for 25-30 FPS low latency WiFi
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.yuv420,
+    );
+
+    _cameraController = controller;
+
+    try {
+      await controller.initialize();
+      if (!mounted) return;
+
+      _minZoom = await controller.getMinZoomLevel();
+      _maxZoom = (await controller.getMaxZoomLevel()).clamp(1.0, 8.0);
+      _zoom = _minZoom;
+
+      // Start live image stream for network broadcasting
+      await controller.startImageStream(_handleCameraImage);
+
+      setState(() {
+        _isCameraInitialized = true;
+      });
+    } catch (e) {
+      debugPrint('Camera start error: $e');
+    }
+  }
+
+  void _handleCameraImage(CameraImage image) {
+    // Throttle frame processing to target ~25 FPS (40ms interval) to keep device cool and smooth
+    final now = DateTime.now();
+    if (_isProcessingFrame || now.difference(_lastFrameTime).inMilliseconds < 35) {
+      return;
+    }
+
+    _isProcessingFrame = true;
+    _lastFrameTime = now;
+
+    try {
+      final jpeg = CameraFrameConverter.convertCameraImageToJpeg(
+        image,
+        quality: 60,
+        targetWidth: 640,
+        targetHeight: 480,
+      );
+
+      if (jpeg != null && jpeg.isNotEmpty) {
+        _server.injectFrame(jpeg);
+      }
+    } catch (e) {
+      debugPrint('Frame conversion error: $e');
+    } finally {
+      _isProcessingFrame = false;
+    }
+  }
+
+  Future<void> _setTorch(bool enable) async {
+    if (_cameraController == null || !_isCameraInitialized) return;
+    try {
+      await _cameraController!.setFlashMode(enable ? FlashMode.torch : FlashMode.off);
+      if (mounted) setState(() => _torchOn = enable);
+    } catch (_) {}
+  }
+
+  Future<void> _setZoom(double zoomVal) async {
+    if (_cameraController == null || !_isCameraInitialized) return;
+    try {
+      final clamped = zoomVal.clamp(_minZoom, _maxZoom);
+      await _cameraController!.setZoomLevel(clamped);
+      if (mounted) setState(() => _zoom = clamped);
+    } catch (_) {}
+  }
+
+  Future<void> _flipCamera() async {
+    if (_availableCameras.length < 2) return;
+    _selectedCameraIndex = (_selectedCameraIndex + 1) % _availableCameras.length;
+    await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    if (state == AppLifecycleState.inactive) {
+      _cameraController?.dispose();
+    } else if (state == AppLifecycleState.resumed) {
+      _initCamera();
     }
   }
 
@@ -111,8 +244,10 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _durationTimer?.cancel();
     _uiRefreshTimer?.cancel();
+    _cameraController?.dispose();
     _server.stopServer();
     _discovery.stopBroadcasting();
     super.dispose();
@@ -125,7 +260,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Jokarz Eye Broadcaster'),
+        title: const Text('Jokarz Eye (Camera Broadcaster)'),
         actions: [
           IconButton(
             icon: const Icon(Icons.qr_code_2, color: JokarzColors.gold),
@@ -139,82 +274,174 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Network',
-            onPressed: _initBroadcasting,
+            tooltip: 'Refresh Network & Camera',
+            onPressed: _initAll,
           ),
         ],
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(18),
+          padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Broadcaster Status Card
+              // Live Camera Viewfinder
               Container(
-                padding: const EdgeInsets.all(16),
+                height: 260,
                 decoration: BoxDecoration(
-                  color: JokarzColors.card,
-                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.black,
+                  borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: _isServerRunning ? JokarzColors.emerald : JokarzColors.crimson,
-                    width: 1.8,
+                    color: _isServerRunning && _server.currentFps > 0
+                        ? JokarzColors.emerald
+                        : JokarzColors.gold,
+                    width: 2,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: (_isServerRunning ? JokarzColors.emerald : JokarzColors.crimson).withAlpha(50),
-                      blurRadius: 16,
+                      color: (_isServerRunning && _server.currentFps > 0
+                              ? JokarzColors.emerald
+                              : JokarzColors.gold)
+                          .withAlpha(60),
+                      blurRadius: 18,
                       offset: const Offset(0, 4),
                     ),
                   ],
                 ),
-                child: Column(
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
+                    if (_isCameraInitialized && _cameraController != null)
+                      Center(
+                        child: CameraPreview(_cameraController!),
+                      )
+                    else
+                      const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            Container(
-                              width: 12,
-                              height: 12,
-                              decoration: BoxDecoration(
-                                color: _isServerRunning ? JokarzColors.emerald : JokarzColors.crimson,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
+                            CircularProgressIndicator(color: JokarzColors.gold),
+                            SizedBox(height: 12),
                             Text(
-                              _isServerRunning ? 'STREAMING ACTIVE' : 'OFFLINE',
-                              style: TextStyle(
-                                color: _isServerRunning ? JokarzColors.emerald : JokarzColors.crimson,
-                                fontWeight: FontWeight.w900,
-                                fontSize: 13,
-                                letterSpacing: 1.2,
-                              ),
+                              'STARTING HARDWARE CAMERA...',
+                              style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold),
                             ),
                           ],
                         ),
-                        Text(
-                          '${_server.currentFps} FPS',
-                          style: const TextStyle(
-                            color: JokarzColors.gold,
-                            fontWeight: FontWeight.bold,
-                            fontFamily: 'monospace',
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
+                      ),
 
-                    // Quick Telemetry Row
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildStatItem('Viewers', '${_server.activeViewers}', Icons.people),
-                        _buildStatItem('Duration', _formatTime(_secondsStreaming), Icons.timer),
-                        _buildStatItem('Port', '${AppConstants.defaultHttpPort}', Icons.lan),
-                      ],
+                    // Top Viewfinder HUD Overlay
+                    Positioned(
+                      top: 12,
+                      left: 12,
+                      right: 12,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withAlpha(200),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: _server.currentFps > 0
+                                    ? JokarzColors.emerald
+                                    : JokarzColors.crimson,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: _server.currentFps > 0
+                                        ? JokarzColors.emerald
+                                        : JokarzColors.crimson,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  _server.currentFps > 0 ? 'LIVE BROADCAST' : 'INITIALIZING',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w900,
+                                    color: _server.currentFps > 0
+                                        ? JokarzColors.emerald
+                                        : JokarzColors.crimson,
+                                    letterSpacing: 1,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withAlpha(200),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: JokarzColors.gold.withAlpha(150)),
+                            ),
+                            child: Text(
+                              '${_server.currentFps} FPS',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: JokarzColors.gold,
+                                fontFamily: 'monospace',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Bottom Quick Overlay Actions
+                    Positioned(
+                      bottom: 10,
+                      left: 12,
+                      right: 12,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          // Torch Toggle
+                          FloatingActionButton.small(
+                            heroTag: 'torchBtn',
+                            backgroundColor: _torchOn ? JokarzColors.gold : Colors.black87,
+                            foregroundColor: _torchOn ? Colors.black : JokarzColors.gold,
+                            onPressed: () => _setTorch(!_torchOn),
+                            child: Icon(_torchOn ? Icons.flashlight_on : Icons.flashlight_off),
+                          ),
+                          // Viewers Pill
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withAlpha(200),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.remove_red_eye, color: JokarzColors.emerald, size: 14),
+                                const SizedBox(width: 6),
+                                Text(
+                                  '${_server.activeViewers} Viewers Connected',
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white),
+                                ),
+                              ],
+                            ),
+                          ),
+                          // Flip Camera
+                          FloatingActionButton.small(
+                            heroTag: 'flipBtn',
+                            backgroundColor: Colors.black87,
+                            foregroundColor: JokarzColors.gold,
+                            onPressed: _flipCamera,
+                            child: const Icon(Icons.flip_camera_ios),
+                          ),
+                        ],
+                      ),
                     ),
                   ],
                 ),
@@ -222,7 +449,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
 
               const SizedBox(height: 16),
 
-              // Fast Pairing Row (QR Code + Hotspot buttons)
+              // Fast Pairing Buttons (QR Code + Hotspot)
               Row(
                 children: [
                   Expanded(
@@ -251,6 +478,26 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
                     ),
                   ),
                 ],
+              ),
+
+              const SizedBox(height: 16),
+
+              // Telemetry Stats Card
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: JokarzColors.card,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: JokarzColors.cardBorder),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildStatItem('Viewers', '${_server.activeViewers}', Icons.people),
+                    _buildStatItem('Duration', _formatTime(_secondsStreaming), Icons.timer),
+                    _buildStatItem('Port', '${AppConstants.defaultHttpPort}', Icons.lan),
+                  ],
+                ),
               ),
 
               const SizedBox(height: 16),
@@ -315,7 +562,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      '📡 Auto-discovery beacon broadcasting on UDP:45454. The controller app will detect this device automatically.',
+                      '📡 Auto-discovery beacon active on UDP:45454. The table controller app will link automatically.',
                       style: TextStyle(fontSize: 11, color: JokarzColors.textSecondary),
                     ),
                   ],
@@ -324,13 +571,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
 
               const SizedBox(height: 16),
 
-              // Camera Hardware Controls & Sim Switch
+              // Hardware Controls
               JokarzCard(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'CAMERA & LIGHT CONTROLS',
+                      'TABLETOP ZOOM & LIGHTING',
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.bold,
@@ -340,46 +587,6 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
                     ),
                     const SizedBox(height: 14),
 
-                    // Torch / Flashlight Toggle
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: Icon(
-                        _torchOn ? Icons.flashlight_on : Icons.flashlight_off,
-                        color: _torchOn ? JokarzColors.gold : JokarzColors.textMuted,
-                      ),
-                      title: const Text('Table Spotlight (Torch)'),
-                      subtitle: const Text('Illuminates cards/dice in dim rooms', style: TextStyle(fontSize: 11)),
-                      value: _torchOn,
-                      activeColor: JokarzColors.gold,
-                      onChanged: (val) {
-                        setState(() {
-                          _torchOn = val;
-                        });
-                      },
-                    ),
-
-                    const Divider(color: JokarzColors.divider),
-
-                    // Front / Back Camera Flip
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(
-                        _frontCam ? Icons.camera_front : Icons.camera_rear,
-                        color: JokarzColors.gold,
-                      ),
-                      title: Text(_frontCam ? 'Front Camera (Selfie)' : 'Rear Camera (Overhead Table)'),
-                      trailing: OutlinedButton(
-                        onPressed: () {
-                          setState(() {
-                            _frontCam = !_frontCam;
-                          });
-                        },
-                        child: const Text('Flip'),
-                      ),
-                    ),
-
-                    const Divider(color: JokarzColors.divider),
-
                     // Digital Zoom Slider
                     Row(
                       children: [
@@ -388,41 +595,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> {
                         Text('Zoom: ${_zoom.toStringAsFixed(1)}x', style: const TextStyle(fontWeight: FontWeight.bold)),
                         Expanded(
                           child: Slider(
-                            value: _zoom,
-                            min: 1.0,
-                            max: 4.0,
-                            divisions: 30,
+                            value: _zoom.clamp(_minZoom, _maxZoom),
+                            min: _minZoom,
+                            max: _maxZoom,
+                            divisions: 20,
                             activeColor: JokarzColors.gold,
-                            onChanged: (val) {
-                              setState(() {
-                                _zoom = val;
-                              });
-                            },
+                            onChanged: (val) => _setZoom(val),
                           ),
                         ),
                       ],
-                    ),
-
-                    const Divider(color: JokarzColors.divider),
-
-                    // Simulator Test Pattern Switch
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      secondary: const Icon(Icons.pattern, color: JokarzColors.velvetPurple),
-                      title: const Text('Poker Table Test Stream'),
-                      subtitle: const Text('Generates high-fps simulated cards & chips feed', style: TextStyle(fontSize: 11)),
-                      value: _isSimulatorMode,
-                      activeColor: JokarzColors.velvetPurple,
-                      onChanged: (val) {
-                        setState(() {
-                          _isSimulatorMode = val;
-                          if (val) {
-                            _server.startSimulatorStream();
-                          } else {
-                            _server.stopSimulatorStream();
-                          }
-                        });
-                      },
                     ),
                   ],
                 ),

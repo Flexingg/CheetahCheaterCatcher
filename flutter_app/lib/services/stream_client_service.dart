@@ -9,6 +9,7 @@ import '../models/camera_device_info.dart';
 typedef FrameCallback = void Function(Uint8List frame);
 
 class StreamClientService {
+  WebSocket? _binaryStreamSocket;
   http.Client? _httpClient;
   WebSocket? _controlSocket;
   StreamSubscription? _streamSubscription;
@@ -31,7 +32,7 @@ class StreamClientService {
   int get currentFps => _currentFps;
   CameraDeviceInfo? get connectedDevice => _connectedDevice;
 
-  /// Connect to camera device MJPEG stream
+  /// Connect to camera device using ultra-low latency binary WebSocket (with HTTP MJPEG fallback)
   Future<void> connect(CameraDeviceInfo device) async {
     disconnect();
     _connectedDevice = device;
@@ -41,8 +42,50 @@ class StreamClientService {
       _receivedFramesCount = 0;
     });
 
-    _connectHttpStream(device);
+    _connectBinaryWsStream(device);
     _connectControlWs(device);
+  }
+
+  void _connectBinaryWsStream(CameraDeviceInfo device) async {
+    final wsStreamUrl = 'ws://${device.ip}:${device.streamPort}/ws/live';
+    debugPrint('[StreamClient] Connecting to binary stream at $wsStreamUrl');
+
+    try {
+      _binaryStreamSocket = await WebSocket.connect(wsStreamUrl).timeout(
+        const Duration(seconds: 4),
+      );
+      _isConnected = true;
+      debugPrint('[StreamClient] Connected to binary live WebSocket!');
+
+      _binaryStreamSocket?.listen(
+        (data) {
+          if (data is List<int>) {
+            _receivedFramesCount++;
+            final frameBytes = data is Uint8List ? data : Uint8List.fromList(data);
+            _frameStreamController.add(frameBytes);
+          } else if (data is String) {
+            try {
+              final json = jsonDecode(data) as Map<String, dynamic>;
+              _telemetryController.add(json);
+            } catch (_) {}
+          }
+        },
+        onDone: () {
+          debugPrint('[StreamClient] Binary WS stream closed, falling back to HTTP...');
+          _binaryStreamSocket = null;
+          _handleStreamDrop();
+        },
+        onError: (err) {
+          debugPrint('[StreamClient] Binary WS error: $err');
+          _binaryStreamSocket = null;
+          _handleStreamDrop();
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      debugPrint('[StreamClient] WS connection failed ($e), falling back to HTTP MJPEG...');
+      _connectHttpStream(device);
+    }
   }
 
   void _connectHttpStream(CameraDeviceInfo device) async {
@@ -66,7 +109,6 @@ class StreamClientService {
             // Extract frames by boundary or SOI/EOI
             final frames = _extractJpegFrames(currentBytes);
             if (frames.extractedFrames.isNotEmpty) {
-              // Retain remainder in buffer
               buffer.clear();
               if (frames.lastRemainder.isNotEmpty) {
                 buffer.add(frames.lastRemainder);
@@ -79,11 +121,11 @@ class StreamClientService {
             }
           },
           onError: (err) {
-            debugPrint('Stream error: $err');
+            debugPrint('[StreamClient] HTTP Stream error: $err');
             _handleStreamDrop();
           },
           onDone: () {
-            debugPrint('Stream finished/disconnected');
+            debugPrint('[StreamClient] HTTP Stream finished');
             _handleStreamDrop();
           },
           cancelOnError: true,
@@ -92,7 +134,7 @@ class StreamClientService {
         _handleStreamDrop();
       }
     } catch (e) {
-      debugPrint('Failed to connect to stream: $e');
+      debugPrint('[StreamClient] Failed to connect HTTP stream: $e');
       _handleStreamDrop();
     }
   }
@@ -149,7 +191,7 @@ class StreamClientService {
       _reconnectTimer = Timer(const Duration(seconds: 2), () {
         if (_connectedDevice != null && !_isConnected) {
           debugPrint('Attempting stream reconnection...');
-          _connectHttpStream(_connectedDevice!);
+          _connectBinaryWsStream(_connectedDevice!);
         }
       });
     }
@@ -185,6 +227,11 @@ class StreamClientService {
     _reconnectTimer = null;
     _fpsTimer?.cancel();
     _fpsTimer = null;
+
+    try {
+      _binaryStreamSocket?.close();
+    } catch (_) {}
+    _binaryStreamSocket = null;
 
     _streamSubscription?.cancel();
     _streamSubscription = null;
