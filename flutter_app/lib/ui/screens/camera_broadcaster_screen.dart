@@ -16,9 +16,10 @@ import '../widgets/offline_hotspot_guide_sheet.dart';
 import '../widgets/poker_card_widgets.dart';
 import '../widgets/qr_pairing_dialog.dart';
 
-enum FpsMode {
-  smooth30,
-  turbo60,
+enum VideoQualityPreset {
+  ultra4k1080p, // Full resolution 1080p / 4K crisp
+  highSpeed60,  // 1080p 60 FPS Turbo
+  balanced720p, // 720p Smooth
 }
 
 class CameraBroadcasterScreen extends StatefulWidget {
@@ -31,7 +32,7 @@ class CameraBroadcasterScreen extends StatefulWidget {
 class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with WidgetsBindingObserver {
   final MjpegCameraServer _server = MjpegCameraServer();
   final NetworkDiscoveryService _discovery = NetworkDiscoveryService();
-  final DvrReplayManager _localDvr = DvrReplayManager(maxCapacity: 450); // ~15-30 seconds rolling buffer
+  final DvrReplayManager _localDvr = DvrReplayManager(maxCapacity: 450); // ~15-30s rolling buffer
 
   List<CameraDescription> _availableCameras = [];
   CameraController? _cameraController;
@@ -42,7 +43,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   bool _isProcessingFrame = false;
   DateTime _lastFrameTime = DateTime.now();
 
-  FpsMode _fpsMode = FpsMode.turbo60; // Default to maximum 60 FPS Turbo for slow-motion capture
+  VideoQualityPreset _qualityPreset = VideoQualityPreset.ultra4k1080p;
 
   List<String> _localIps = [];
   int _secondsStreaming = 0;
@@ -165,6 +166,17 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     }
   }
 
+  ResolutionPreset _getResolutionPreset() {
+    switch (_qualityPreset) {
+      case VideoQualityPreset.ultra4k1080p:
+        return ResolutionPreset.veryHigh; // 1080p / 4K full sensor resolution
+      case VideoQualityPreset.highSpeed60:
+        return ResolutionPreset.high; // 720p / 1080p high framerate
+      case VideoQualityPreset.balanced720p:
+        return ResolutionPreset.medium; // 480p / 720p
+    }
+  }
+
   Future<void> _startCameraInstance(CameraDescription description) async {
     try {
       if (_cameraController != null) {
@@ -175,13 +187,9 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       _isCameraInitialized = false;
       if (mounted) setState(() {});
 
-      final preset = _fpsMode == FpsMode.turbo60
-          ? ResolutionPreset.low // 352x288 / 480p maximizes frame-rate to 60 FPS for instant slow-mo
-          : ResolutionPreset.medium; // 720p
-
       final controller = CameraController(
         description,
-        preset,
+        _getResolutionPreset(),
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.yuv420,
       );
@@ -212,8 +220,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
   void _handleCameraImage(CameraImage image) {
     final now = DateTime.now();
-    // In Turbo 60 mode, interval is ~14ms (up to 60 FPS). In 30 mode, interval is ~33ms
-    final minIntervalMs = _fpsMode == FpsMode.turbo60 ? 14 : 33;
+    // In High-Speed 60 mode, allow 12ms intervals (~60-80 FPS). In Ultra 4K mode, allow 20ms intervals.
+    final minIntervalMs = _qualityPreset == VideoQualityPreset.highSpeed60 ? 12 : 20;
 
     if (_isProcessingFrame || now.difference(_lastFrameTime).inMilliseconds < minIntervalMs) {
       return;
@@ -223,16 +231,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     _lastFrameTime = now;
 
     try {
+      // Crisp 1:1 pixel resolution (strideStep = 1) and 80% JPEG quality for razor-sharp replay cards
       final jpeg = CameraFrameConverter.convertCameraImageToJpeg(
         image,
-        quality: _fpsMode == FpsMode.turbo60 ? 50 : 65,
-        strideStep: _fpsMode == FpsMode.turbo60 ? 2 : 1,
+        quality: _qualityPreset == VideoQualityPreset.ultra4k1080p ? 82 : 72,
+        strideStep: 1, // Full 1:1 crisp pixel resolution
       );
 
       if (jpeg != null && jpeg.isNotEmpty) {
-        // Feed local rolling buffer for on-device slow-mo testing
         _localDvr.pushFrame(jpeg);
-        // Broadcast over WebSocket to table controller
         _server.injectFrame(jpeg);
       }
     } catch (e) {
@@ -282,7 +289,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     if (_localDvr.totalBufferedFrames == 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Capturing frames into DVR buffer... try again in 2 seconds.'),
+          content: Text('Capturing high-res frames into DVR buffer... try again in 2 seconds.'),
           backgroundColor: JokarzColors.card,
         ),
       );
@@ -417,8 +424,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         child: FittedBox(
                           fit: BoxFit.cover,
                           child: SizedBox(
-                            width: _cameraController!.value.previewSize?.height ?? 640,
-                            height: _cameraController!.value.previewSize?.width ?? 480,
+                            width: _cameraController!.value.previewSize?.height ?? 1280,
+                            height: _cameraController!.value.previewSize?.width ?? 720,
                             child: CameraPreview(_cameraController!),
                           ),
                         ),
@@ -530,7 +537,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  _server.currentFps > 0 ? 'LIVE STREAM' : 'STARTING SENSOR',
+                                  _server.currentFps > 0 ? 'CRISP LIVE STREAM' : 'STARTING SENSOR',
                                   style: TextStyle(
                                     fontSize: 10,
                                     fontWeight: FontWeight.w900,
@@ -624,7 +631,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
 
               const SizedBox(height: 14),
 
-              // FPS Turbo Speed Selector (30 FPS vs 60 FPS Turbo)
+              // Resolution & High-Speed FPS Preset Selector
               Container(
                 padding: const EdgeInsets.all(4),
                 decoration: BoxDecoration(
@@ -637,8 +644,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     Expanded(
                       child: InkWell(
                         onTap: () {
-                          if (_fpsMode != FpsMode.turbo60) {
-                            setState(() => _fpsMode = FpsMode.turbo60);
+                          if (_qualityPreset != VideoQualityPreset.ultra4k1080p) {
+                            setState(() => _qualityPreset = VideoQualityPreset.ultra4k1080p);
                             if (_availableCameras.isNotEmpty) {
                               _startCameraInstance(_availableCameras[_selectedCameraIndex]);
                             }
@@ -648,18 +655,53 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           decoration: BoxDecoration(
-                            color: _fpsMode == FpsMode.turbo60 ? JokarzColors.crimson : Colors.transparent,
+                            color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? JokarzColors.gold : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.four_k, size: 16, color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? Colors.black : JokarzColors.textSecondary),
+                              const SizedBox(width: 4),
+                              Text(
+                                '💎 4K / 1080p CRISP',
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? Colors.black : JokarzColors.textSecondary,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: InkWell(
+                        onTap: () {
+                          if (_qualityPreset != VideoQualityPreset.highSpeed60) {
+                            setState(() => _qualityPreset = VideoQualityPreset.highSpeed60);
+                            if (_availableCameras.isNotEmpty) {
+                              _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+                            }
+                          }
+                        },
+                        borderRadius: BorderRadius.circular(10),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          decoration: BoxDecoration(
+                            color: _qualityPreset == VideoQualityPreset.highSpeed60 ? JokarzColors.crimson : Colors.transparent,
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: const Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Icon(Icons.bolt, size: 16, color: Colors.white),
-                              SizedBox(width: 6),
+                              SizedBox(width: 4),
                               Text(
-                                '🚀 60 FPS TURBO (MAX SLOW-MO)',
+                                '🚀 60 FPS TURBO',
                                 style: TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 10.5,
                                   fontWeight: FontWeight.w900,
                                   color: Colors.white,
                                 ),
@@ -672,8 +714,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     Expanded(
                       child: InkWell(
                         onTap: () {
-                          if (_fpsMode != FpsMode.smooth30) {
-                            setState(() => _fpsMode = FpsMode.smooth30);
+                          if (_qualityPreset != VideoQualityPreset.balanced720p) {
+                            setState(() => _qualityPreset = VideoQualityPreset.balanced720p);
                             if (_availableCameras.isNotEmpty) {
                               _startCameraInstance(_availableCameras[_selectedCameraIndex]);
                             }
@@ -683,20 +725,20 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 10),
                           decoration: BoxDecoration(
-                            color: _fpsMode == FpsMode.smooth30 ? JokarzColors.gold : Colors.transparent,
+                            color: _qualityPreset == VideoQualityPreset.balanced720p ? JokarzColors.emerald : Colors.transparent,
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Row(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.hd, size: 16, color: _fpsMode == FpsMode.smooth30 ? Colors.black : JokarzColors.textSecondary),
-                              const SizedBox(width: 6),
+                              Icon(Icons.speed, size: 16, color: _qualityPreset == VideoQualityPreset.balanced720p ? Colors.black : JokarzColors.textSecondary),
+                              const SizedBox(width: 4),
                               Text(
-                                '⚡ 30 FPS (HD QUALITY)',
+                                '⚡ 720p FAST',
                                 style: TextStyle(
-                                  fontSize: 11,
+                                  fontSize: 10.5,
                                   fontWeight: FontWeight.w900,
-                                  color: _fpsMode == FpsMode.smooth30 ? Colors.black : JokarzColors.textSecondary,
+                                  color: _qualityPreset == VideoQualityPreset.balanced720p ? Colors.black : JokarzColors.textSecondary,
                                 ),
                               ),
                             ],
@@ -923,7 +965,6 @@ class _TableAlignmentGridPainter extends CustomPainter {
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;
 
-    // 3x3 Rule of Thirds Grid
     final thirdW = size.width / 3;
     final thirdH = size.height / 3;
 
@@ -932,7 +973,6 @@ class _TableAlignmentGridPainter extends CustomPainter {
     canvas.drawLine(Offset(0, thirdH), Offset(size.width, thirdH), paint);
     canvas.drawLine(Offset(0, thirdH * 2), Offset(size.width, thirdH * 2), paint);
 
-    // Center Crosshair
     final centerPaint = Paint()
       ..color = JokarzColors.emerald.withAlpha(120)
       ..strokeWidth = 1.5;
