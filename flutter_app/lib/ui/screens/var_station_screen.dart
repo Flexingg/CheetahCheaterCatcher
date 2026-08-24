@@ -18,6 +18,7 @@ class VarStationScreen extends StatefulWidget {
 
 class _VarStationScreenState extends State<VarStationScreen> {
   final TransformationController _transformController = TransformationController();
+  final bool _showControlsOverlay = true;
 
   @override
   void dispose() {
@@ -46,18 +47,18 @@ class _VarStationScreenState extends State<VarStationScreen> {
             // Top VAR Referee Control Bar
             _buildTopActionBar(context, varProvider, telestrator),
 
-            // Video Player + Telestrator Interactive Viewport
+            // Video Player + Telestrator + Alignment Grid Viewport
             Expanded(
               child: Stack(
                 children: [
-                  // Video Viewport with Pinch-To-Zoom and Pan
+                  // Video Viewport with Pinch-To-Zoom (up to 8.0x) and Pan
                   Positioned.fill(
                     child: Container(
                       color: Colors.black,
                       child: InteractiveViewer(
                         transformationController: _transformController,
                         minScale: 1.0,
-                        maxScale: 5.0,
+                        maxScale: 8.0,
                         panEnabled: !telestrator.isDrawingEnabled,
                         scaleEnabled: !telestrator.isDrawingEnabled,
                         child: Center(
@@ -66,6 +67,16 @@ class _VarStationScreenState extends State<VarStationScreen> {
                       ),
                     ),
                   ),
+
+                  // Tabletop Framing Alignment Grid Overlay
+                  if (varProvider.isAlignmentGridVisible && varProvider.isConnected)
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: CustomPaint(
+                          painter: _TableAlignmentGridPainter(),
+                        ),
+                      ),
+                    ),
 
                   // Telestrator Drawing Layer
                   const Positioned.fill(
@@ -80,15 +91,53 @@ class _VarStationScreenState extends State<VarStationScreen> {
                   ),
 
                   // Remote Camera Controls Pill (Top-Right)
-                  if (varProvider.isConnected)
+                  if (varProvider.isConnected && _showControlsOverlay)
                     Positioned(
                       top: 12,
                       right: 12,
                       child: _buildRemoteControlsPill(varProvider),
                     ),
+
+                  // Floating Quick Zoom & Overlay Controls (Bottom-Right)
+                  if (varProvider.isConnected && !varProvider.isReplayActive)
+                    Positioned(
+                      bottom: 12,
+                      right: 12,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FloatingActionButton.small(
+                            heroTag: 'resetZoomBtn',
+                            backgroundColor: Colors.black87,
+                            foregroundColor: JokarzColors.gold,
+                            tooltip: 'Reset Viewport Zoom',
+                            onPressed: () {
+                              _transformController.value = Matrix4.identity();
+                            },
+                            child: const Icon(Icons.zoom_out_map, size: 20),
+                          ),
+                          const SizedBox(height: 8),
+                          FloatingActionButton.small(
+                            heroTag: 'toggleOverlayBtn',
+                            backgroundColor: Colors.black87,
+                            foregroundColor: JokarzColors.gold,
+                            tooltip: 'Toggle Table Grid',
+                            onPressed: varProvider.toggleAlignmentGrid,
+                            child: Icon(
+                              varProvider.isAlignmentGridVisible ? Icons.grid_on : Icons.grid_off,
+                              size: 20,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               ),
             ),
+
+            // Remote Zoom & Quality Bar (When connected & NOT in replay)
+            if (varProvider.isConnected && !varProvider.isReplayActive)
+              _buildCameraSettingsBar(context, varProvider),
 
             // Bottom Replay Scrubber (Appears when Replay is active)
             if (varProvider.isReplayActive)
@@ -97,7 +146,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
                 child: ReplayScrubberWidget(),
               ),
 
-            // Bottom Bar: Replay / Telestrator / Ref Actions (when Replay is NOT active)
+            // Bottom Bar: Replay / Telestrator Actions (when Replay is NOT active)
             if (!varProvider.isReplayActive)
               _buildBottomControlsBar(context, varProvider, telestrator),
           ],
@@ -157,6 +206,17 @@ class _VarStationScreenState extends State<VarStationScreen> {
           ),
 
           const Spacer(),
+
+          // Grid Toggle
+          IconButton(
+            icon: Icon(
+              varProvider.isAlignmentGridVisible ? Icons.grid_on : Icons.grid_off,
+              color: varProvider.isAlignmentGridVisible ? JokarzColors.gold : JokarzColors.textMuted,
+              size: 22,
+            ),
+            tooltip: 'Toggle Table Grid',
+            onPressed: varProvider.toggleAlignmentGrid,
+          ),
 
           // Whistle & Soundboard Trigger
           IconButton(
@@ -228,6 +288,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
         frameBytes,
         gaplessPlayback: true,
         fit: BoxFit.contain,
+        filterQuality: FilterQuality.high,
         errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
       );
     }
@@ -289,7 +350,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: Colors.black.withAlpha(190),
+        color: Colors.black.withAlpha(210),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
           color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
@@ -309,7 +370,9 @@ class _VarStationScreenState extends State<VarStationScreen> {
           ),
           const SizedBox(width: 6),
           Text(
-            isReplay ? 'VAR REPLAY' : 'LIVE ${varProvider.currentFps} FPS',
+            isReplay
+                ? 'VAR REPLAY (${varProvider.totalBufferedFrames}f)'
+                : 'CRISP LIVE ${varProvider.currentFps} FPS',
             style: TextStyle(
               color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
               fontSize: 11,
@@ -326,7 +389,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black.withAlpha(190),
+        color: Colors.black.withAlpha(210),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: JokarzColors.cardBorder),
       ),
@@ -340,7 +403,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
               size: 18,
               color: varProvider.isRemoteTorchOn ? JokarzColors.gold : Colors.white70,
             ),
-            tooltip: 'Remote Table Torch',
+            tooltip: 'Remote Table Spotlight (Flash)',
             visualDensity: VisualDensity.compact,
             onPressed: varProvider.toggleRemoteTorch,
           ),
@@ -352,6 +415,102 @@ class _VarStationScreenState extends State<VarStationScreen> {
             onPressed: varProvider.flipRemoteCamera,
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCameraSettingsBar(BuildContext context, VarReplayProvider varProvider) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      color: JokarzColors.surface,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Mode / Resolution Selector Row
+          Row(
+            children: [
+              _buildQualityPill(
+                varProvider,
+                'ultra4k1080p',
+                '💎 4K / 1080p CRISP',
+                JokarzColors.gold,
+              ),
+              const SizedBox(width: 8),
+              _buildQualityPill(
+                varProvider,
+                'highSpeed60',
+                '🚀 60 FPS TURBO',
+                JokarzColors.crimson,
+              ),
+              const SizedBox(width: 8),
+              _buildQualityPill(
+                varProvider,
+                'balanced720p',
+                '⚡ 720p FAST',
+                JokarzColors.emerald,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+
+          // Remote Zoom Slider Row
+          Row(
+            children: [
+              const Icon(Icons.zoom_in, color: JokarzColors.gold, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'Remote Zoom: ${varProvider.remoteZoom.toStringAsFixed(1)}x',
+                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+              ),
+              Expanded(
+                child: Slider(
+                  value: varProvider.remoteZoom.clamp(1.0, 4.0),
+                  min: 1.0,
+                  max: 4.0,
+                  divisions: 15,
+                  activeColor: JokarzColors.gold,
+                  onChanged: (val) => varProvider.setRemoteZoom(val),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQualityPill(
+    VarReplayProvider varProvider,
+    String presetKey,
+    String label,
+    Color activeColor,
+  ) {
+    final isSelected = varProvider.remoteQuality == presetKey;
+
+    return Expanded(
+      child: InkWell(
+        onTap: () => varProvider.setRemoteQualityPreset(presetKey),
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            color: isSelected ? activeColor : JokarzColors.background,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: isSelected ? activeColor : JokarzColors.cardBorder,
+            ),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w900,
+                color: isSelected ? (activeColor == JokarzColors.gold ? Colors.black : Colors.white) : JokarzColors.textSecondary,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -374,27 +533,49 @@ class _VarStationScreenState extends State<VarStationScreen> {
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
-              icon: const Icon(Icons.history, size: 20),
+              icon: const Icon(Icons.slow_motion_video, size: 20),
               label: const Text(
-                'INSTANT REPLAY',
+                'INSTANT SLOW-MO REPLAY',
                 style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1),
               ),
               onPressed: varProvider.enterReplayMode,
             ),
           ),
-          const SizedBox(width: 12),
-
-          // Reset Zoom button (if zoomed)
-          if (varProvider.refZoomScale > 1.05)
-            IconButton(
-              icon: const Icon(Icons.zoom_out_map, color: JokarzColors.gold),
-              tooltip: 'Reset Zoom',
-              onPressed: () {
-                _transformController.value = Matrix4.identity();
-              },
-            ),
         ],
       ),
     );
   }
+}
+
+/// Table alignment grid painter for referee alignment
+class _TableAlignmentGridPainter extends CustomPainter {
+  const _TableAlignmentGridPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = JokarzColors.gold.withAlpha(70)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final thirdW = size.width / 3;
+    final thirdH = size.height / 3;
+
+    canvas.drawLine(Offset(thirdW, 0), Offset(thirdW, size.height), paint);
+    canvas.drawLine(Offset(thirdW * 2, 0), Offset(thirdW * 2, size.height), paint);
+    canvas.drawLine(Offset(0, thirdH), Offset(size.width, thirdH), paint);
+    canvas.drawLine(Offset(0, thirdH * 2), Offset(size.width, thirdH * 2), paint);
+
+    final centerPaint = Paint()
+      ..color = JokarzColors.emerald.withAlpha(120)
+      ..strokeWidth = 1.5;
+
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    canvas.drawLine(Offset(cx - 15, cy), Offset(cx + 15, cy), centerPaint);
+    canvas.drawLine(Offset(cx, cy - 15), Offset(cx, cy + 15), centerPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

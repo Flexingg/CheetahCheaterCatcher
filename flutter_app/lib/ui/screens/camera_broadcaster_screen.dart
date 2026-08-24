@@ -91,6 +91,18 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
         if (action == 'torch' && value is bool) _setTorch(value);
         if (action == 'zoom' && value is num) _setZoom(value.toDouble());
         if (action == 'flip_camera') _flipCamera();
+        if (action == 'quality_preset' && value is String) {
+          if (value == 'ultra4k1080p') {
+            setState(() => _qualityPreset = VideoQualityPreset.ultra4k1080p);
+          } else if (value == 'highSpeed60') {
+            setState(() => _qualityPreset = VideoQualityPreset.highSpeed60);
+          } else if (value == 'balanced720p') {
+            setState(() => _qualityPreset = VideoQualityPreset.balanced720p);
+          }
+          if (_availableCameras.isNotEmpty) {
+            _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+          }
+        }
         if (action == 'sound_alert') {
           SoundEffectsService.playVarWhistle();
           ScaffoldMessenger.of(context).showSnackBar(

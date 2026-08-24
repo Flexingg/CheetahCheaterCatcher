@@ -170,6 +170,24 @@ class VarReplayProvider extends ChangeNotifier {
     _dvrManager.setSpeed(speed);
   }
 
+  // Alignment grid overlay on table client
+  bool _isAlignmentGridVisible = true;
+  String _remoteQuality = 'ultra4k1080p';
+
+  bool get isAlignmentGridVisible => _isAlignmentGridVisible;
+  String get remoteQuality => _remoteQuality;
+
+  void toggleAlignmentGrid() {
+    _isAlignmentGridVisible = !_isAlignmentGridVisible;
+    notifyListeners();
+  }
+
+  void setRemoteQualityPreset(String preset) {
+    _remoteQuality = preset;
+    _streamClient.sendControlCommand('quality_preset', preset);
+    notifyListeners();
+  }
+
   // --- Remote Camera Commands ---
   void toggleRemoteTorch() {
     _isRemoteTorchOn = !_isRemoteTorchOn;
@@ -191,7 +209,7 @@ class VarReplayProvider extends ChangeNotifier {
 
   // --- Referee Zoom / Pan Inspection ---
   void updateRefereeZoom(double scale, Offset pan) {
-    _refZoomScale = scale.clamp(1.0, 5.0);
+    _refZoomScale = scale.clamp(1.0, 8.0);
     _refPanOffset = pan;
     notifyListeners();
   }
