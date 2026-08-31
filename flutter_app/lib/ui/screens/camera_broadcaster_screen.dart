@@ -1,27 +1,27 @@
 import 'dart:async';
-import 'package:camera/camera.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:torch_light/torch_light.dart';
+
 import '../../constants/app_constants.dart';
 import '../../constants/app_theme.dart';
-import '../../services/camera_frame_converter.dart';
-import '../../services/dvr_replay_manager.dart';
-import '../../services/mjpeg_camera_server.dart';
+import '../../services/eye_webrtc_service.dart';
 import '../../services/network_discovery_service.dart';
 import '../../services/sound_effects_service.dart';
-import '../widgets/camera_replay_tester_sheet.dart';
 import '../widgets/offline_hotspot_guide_sheet.dart';
 import '../widgets/poker_card_widgets.dart';
 import '../widgets/qr_pairing_dialog.dart';
 
 enum VideoQualityPreset {
-  ultra4k1080p, // Full resolution 1080p / 4K crisp
-  highSpeed60,  // 1080p 60 FPS Turbo
-  balanced720p, // 720p Smooth
+  ultra4k1080p, // 1080p @ 30fps
+  highSpeed60, // 720p @ 60fps
+  balanced720p, // 720p @ 30fps
 }
 
+/// The Jokarz Eye — captures the camera via WebRTC (hardware H.264 on Android)
+/// and broadcasts it peer-to-peer over local Wi-Fi to Table viewers.
 class CameraBroadcasterScreen extends StatefulWidget {
   const CameraBroadcasterScreen({super.key});
 
@@ -29,33 +29,27 @@ class CameraBroadcasterScreen extends StatefulWidget {
   State<CameraBroadcasterScreen> createState() => _CameraBroadcasterScreenState();
 }
 
-class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with WidgetsBindingObserver {
-  final MjpegCameraServer _server = MjpegCameraServer();
+class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen>
+    with WidgetsBindingObserver {
+  final EyeWebRtcService _eye = EyeWebRtcService();
   final NetworkDiscoveryService _discovery = NetworkDiscoveryService();
-  final DvrReplayManager _localDvr = DvrReplayManager(maxCapacity: 450); // ~15-30s rolling buffer
 
-  List<CameraDescription> _availableCameras = [];
-  CameraController? _cameraController;
-  int _selectedCameraIndex = 0;
-  bool _isCameraInitialized = false;
   bool _hasPermission = false;
   String? _errorMessage;
-  bool _isProcessingFrame = false;
-  DateTime _lastFrameTime = DateTime.now();
 
   VideoQualityPreset _qualityPreset = VideoQualityPreset.ultra4k1080p;
+  bool _torchOn = false;
+  bool _showAlignmentGrid = true;
+  bool _isFullScreenPreview = false;
+
+  final double _minZoom = 1.0;
+  final double _maxZoom = 8.0;
+  double _zoom = 1.0;
 
   List<String> _localIps = [];
   int _secondsStreaming = 0;
   Timer? _durationTimer;
   Timer? _uiRefreshTimer;
-
-  bool _torchOn = false;
-  double _zoom = 1.0;
-  double _minZoom = 1.0;
-  double _maxZoom = 4.0;
-  bool _showAlignmentGrid = true;
-  bool _isFullScreenPreview = false;
 
   @override
   void initState() {
@@ -68,269 +62,94 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
     setState(() {
       _errorMessage = null;
     });
-    await _initBroadcasting();
-    await _checkPermissionsAndInitCamera();
-  }
 
-  Future<void> _initBroadcasting() async {
     _localIps = await NetworkDiscoveryService.getLocalIpAddresses();
     if (_localIps.isEmpty) {
       _localIps = ['127.0.0.1'];
     }
 
-    final success = await _server.startServer();
-    if (success) {
+    await _checkPermissionsAndStart();
+  }
+
+  Future<void> _checkPermissionsAndStart() async {
+    var status = await Permission.camera.status;
+    if (!status.isGranted) {
+      status = await Permission.camera.request();
+    }
+
+    if (!status.isGranted) {
+      setState(() {
+        _hasPermission = false;
+        _errorMessage = 'Camera permission required to stream tabletop video.';
+      });
+      return;
+    }
+    setState(() => _hasPermission = true);
+
+    try {
+      await _eye.start(streamPort: AppConstants.defaultHttpPort);
+      _eye.onSoundAlert = (soundType) {
+        if (!mounted) return;
+        if (soundType == 'whistle') SoundEffectsService.playVarWhistle();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              soundType == 'whistle'
+                  ? '🚨 REMOTE VAR REFEREE WHISTLE TRIGGERED!'
+                  : '🔊 Remote sound alert: $soundType',
+            ),
+            backgroundColor: JokarzColors.crimsonDark,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      };
+
       await _discovery.startBroadcasting(
         deviceName: 'Jokarz Eye (${_localIps.first})',
         streamPort: AppConstants.defaultHttpPort,
         controlPort: AppConstants.defaultControlPort,
       );
 
-      _server.onRemoteCommand = (action, value) {
-        if (!mounted) return;
-        if (action == 'torch' && value is bool) _setTorch(value);
-        if (action == 'zoom' && value is num) _setZoom(value.toDouble());
-        if (action == 'flip_camera') _flipCamera();
-        if (action == 'quality_preset' && value is String) {
-          if (value == 'ultra4k1080p') {
-            setState(() => _qualityPreset = VideoQualityPreset.ultra4k1080p);
-          } else if (value == 'highSpeed60') {
-            setState(() => _qualityPreset = VideoQualityPreset.highSpeed60);
-          } else if (value == 'balanced720p') {
-            setState(() => _qualityPreset = VideoQualityPreset.balanced720p);
-          }
-          if (_availableCameras.isNotEmpty) {
-            _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-          }
-        }
-        if (action == 'sound_alert') {
-          SoundEffectsService.playVarWhistle();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('🚨 REMOTE VAR REFEREE WHISTLE TRIGGERED!'),
-              backgroundColor: JokarzColors.crimsonDark,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-      };
-
       _durationTimer?.cancel();
       _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) {
-          setState(() {
-            _secondsStreaming++;
-          });
+          setState(() => _secondsStreaming++);
         }
       });
-
       _uiRefreshTimer?.cancel();
       _uiRefreshTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
         if (mounted) setState(() {});
       });
-    }
-  }
 
-  Future<void> _checkPermissionsAndInitCamera() async {
-    var status = await Permission.camera.status;
-    if (!status.isGranted) {
-      status = await Permission.camera.request();
-    }
-
-    if (status.isGranted) {
-      setState(() {
-        _hasPermission = true;
-        _errorMessage = null;
-      });
-      await _initCamera();
-    } else {
-      setState(() {
-        _hasPermission = false;
-        _errorMessage = 'Camera permission required to see and stream tabletop video.';
-      });
-    }
-  }
-
-  Future<void> _initCamera() async {
-    try {
-      _availableCameras = await availableCameras();
-      if (_availableCameras.isEmpty) {
-        setState(() {
-          _errorMessage = 'No camera hardware found on this device.';
-        });
-        return;
-      }
-
-      _selectedCameraIndex = 0;
-      for (int i = 0; i < _availableCameras.length; i++) {
-        if (_availableCameras[i].lensDirection == CameraLensDirection.back) {
-          _selectedCameraIndex = i;
-          break;
-        }
-      }
-
-      await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
+      setState(() => _errorMessage = null);
     } catch (e) {
-      debugPrint('Error finding cameras: $e');
-      setState(() {
-        _errorMessage = 'Camera search error: $e';
-      });
+      setState(() => _errorMessage = 'Camera startup error: $e');
     }
   }
 
-  ResolutionPreset _getResolutionPreset() {
-    switch (_qualityPreset) {
-      case VideoQualityPreset.ultra4k1080p:
-        return ResolutionPreset.veryHigh; // 1080p / 4K full sensor resolution
-      case VideoQualityPreset.highSpeed60:
-        return ResolutionPreset.high; // 720p / 1080p high framerate
-      case VideoQualityPreset.balanced720p:
-        return ResolutionPreset.medium; // 480p / 720p
-    }
-  }
-
-  int _sensorOrientation = 90;
-
-  Future<void> _startCameraInstance(CameraDescription description) async {
-    try {
-      if (_cameraController != null) {
-        await _cameraController!.dispose();
-        _cameraController = null;
-      }
-
-      _isCameraInitialized = false;
-      _sensorOrientation = description.sensorOrientation;
-      if (mounted) setState(() {});
-
-      final controller = CameraController(
-        description,
-        _getResolutionPreset(),
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
-      );
-
-      _cameraController = controller;
-      await controller.initialize();
-
-      if (!mounted) return;
-
-      _minZoom = await controller.getMinZoomLevel();
-      _maxZoom = (await controller.getMaxZoomLevel()).clamp(1.0, 8.0);
-      _zoom = _minZoom;
-
-      // Start high-speed image stream
-      await controller.startImageStream(_handleCameraImage);
-
-      setState(() {
-        _isCameraInitialized = true;
-        _errorMessage = null;
-      });
-    } catch (e) {
-      debugPrint('Camera startup error: $e');
-      setState(() {
-        _errorMessage = 'Camera initialization error: $e';
-      });
-    }
-  }
-
-  void _handleCameraImage(CameraImage image) {
-    final now = DateTime.now();
-    // In High-Speed 60 mode, allow 12ms intervals (~60-80 FPS). In Ultra 4K mode, allow 20ms intervals.
-    final minIntervalMs = _qualityPreset == VideoQualityPreset.highSpeed60 ? 12 : 20;
-
-    if (_isProcessingFrame || now.difference(_lastFrameTime).inMilliseconds < minIntervalMs) {
-      return;
-    }
-
-    _isProcessingFrame = true;
-    _lastFrameTime = now;
-
-    try {
-      // Crisp 1:1 pixel resolution (strideStep = 1) and rotated upright
-      final jpeg = CameraFrameConverter.convertCameraImageToJpeg(
-        image,
-        quality: _qualityPreset == VideoQualityPreset.ultra4k1080p ? 85 : 75,
-        strideStep: 1, // Full 1:1 crisp pixel resolution
-        rotationAngle: _sensorOrientation,
-      );
-
-      if (jpeg != null && jpeg.isNotEmpty) {
-        _localDvr.pushFrame(jpeg);
-        _server.injectFrame(jpeg);
-      }
-    } catch (e) {
-      debugPrint('Frame processing error: $e');
-    } finally {
-      _isProcessingFrame = false;
-    }
+  Future<void> _applyPreset(VideoQualityPreset preset) async {
+    if (preset == _qualityPreset) return;
+    setState(() => _qualityPreset = preset);
+    final name = switch (preset) {
+      VideoQualityPreset.ultra4k1080p => 'ultra4k1080p',
+      VideoQualityPreset.highSpeed60 => 'highSpeed60',
+      VideoQualityPreset.balanced720p => 'balanced720p',
+    };
+    await _eye.setQualityPreset(name);
   }
 
   Future<void> _setTorch(bool enable) async {
-    try {
-      if (enable) {
-        await TorchLight.enableTorch();
-      } else {
-        await TorchLight.disableTorch();
-      }
-      if (mounted) setState(() => _torchOn = enable);
-      return;
-    } catch (e) {
-      debugPrint('TorchLight plugin notice: $e');
-    }
-
-    if (_cameraController != null && _isCameraInitialized) {
-      try {
-        await _cameraController!.setFlashMode(enable ? FlashMode.torch : FlashMode.off);
-        if (mounted) setState(() => _torchOn = enable);
-      } catch (_) {}
-    }
+    await _eye.setTorch(enable);
+    if (mounted) setState(() => _torchOn = enable);
   }
 
-  Future<void> _setZoom(double zoomVal) async {
-    if (_cameraController == null || !_isCameraInitialized) return;
-    try {
-      final clamped = zoomVal.clamp(_minZoom, _maxZoom);
-      await _cameraController!.setZoomLevel(clamped);
-      if (mounted) setState(() => _zoom = clamped);
-    } catch (_) {}
+  Future<void> _setZoom(double value) async {
+    setState(() => _zoom = value.clamp(_minZoom, _maxZoom));
+    await _eye.setZoom(_zoom);
   }
 
   Future<void> _flipCamera() async {
-    if (_availableCameras.length < 2) return;
-    _selectedCameraIndex = (_selectedCameraIndex + 1) % _availableCameras.length;
-    await _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-  }
-
-  void _openReplayTester() {
-    if (_localDvr.totalBufferedFrames == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Capturing high-res frames into DVR buffer... try again in 2 seconds.'),
-          backgroundColor: JokarzColors.card,
-        ),
-      );
-      return;
-    }
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => CameraReplayTesterSheet(
-        dvrManager: _localDvr,
-        captureFps: _server.currentFps > 0 ? _server.currentFps : 60,
-      ),
-    );
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
-    if (state == AppLifecycleState.inactive) {
-      _cameraController?.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _checkPermissionsAndInitCamera();
-    }
+    await _eye.flipCamera();
   }
 
   void _showQrDialog() {
@@ -356,13 +175,18 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissionsAndStart();
+    }
+  }
+
+  @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _durationTimer?.cancel();
     _uiRefreshTimer?.cancel();
-    _cameraController?.dispose();
-    _setTorch(false);
-    _server.stopServer();
+    _eye.dispose();
     _discovery.stopBroadcasting();
     super.dispose();
   }
@@ -370,17 +194,14 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   @override
   Widget build(BuildContext context) {
     final primaryIp = _localIps.isNotEmpty ? _localIps.first : '127.0.0.1';
-    final streamUrl = 'http://$primaryIp:${AppConstants.defaultHttpPort}/live';
+    final signalUrl = 'http://$primaryIp:${AppConstants.defaultHttpPort}/webrtc/offer';
+    final isLive = _eye.isStreaming;
+    final fps = _eye.currentFps;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Jokarz Eye (Camera Streamer)'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.slow_motion_video, color: JokarzColors.crimson),
-            tooltip: 'Test Slow-Mo Replay',
-            onPressed: _openReplayTester,
-          ),
           IconButton(
             icon: Icon(
               _showAlignmentGrid ? Icons.grid_on : Icons.grid_off,
@@ -401,7 +222,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Camera',
+            tooltip: 'Restart Stream',
             onPressed: _initAll,
           ),
         ],
@@ -419,12 +240,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                   color: Colors.black,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
-                    color: _server.currentFps > 0 ? JokarzColors.emerald : JokarzColors.gold,
+                    color: isLive ? JokarzColors.emerald : JokarzColors.gold,
                     width: 2.2,
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: (_server.currentFps > 0 ? JokarzColors.emerald : JokarzColors.gold).withAlpha(80),
+                      color: (isLive ? JokarzColors.emerald : JokarzColors.gold)
+                          .withAlpha(80),
                       blurRadius: 20,
                       offset: const Offset(0, 4),
                     ),
@@ -434,17 +256,11 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    // Live Camera Viewport
-                    if (_isCameraInitialized && _cameraController != null)
-                      Center(
-                        child: FittedBox(
-                          fit: BoxFit.cover,
-                          child: SizedBox(
-                            width: _cameraController!.value.previewSize?.height ?? 1280,
-                            height: _cameraController!.value.previewSize?.width ?? 720,
-                            child: CameraPreview(_cameraController!),
-                          ),
-                        ),
+                    // Live WebRTC viewfinder
+                    if (_hasPermission && isLive)
+                      RTCVideoView(
+                        _eye.localRenderer,
+                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                       )
                     else if (!_hasPermission)
                       Center(
@@ -453,70 +269,60 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              const Icon(Icons.videocam_off, size: 48, color: JokarzColors.crimson),
+                              const Icon(Icons.videocam_off,
+                                  size: 48, color: JokarzColors.crimson),
                               const SizedBox(height: 12),
                               const Text(
                                 'CAMERA PERMISSION REQUIRED',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 14),
+                                style: TextStyle(
+                                  color: JokarzColors.gold,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 14,
+                                ),
                               ),
                               const SizedBox(height: 8),
                               const Text(
                                 'Allow camera access so Jokarz Eye can broadcast your game table.',
                                 textAlign: TextAlign.center,
-                                style: TextStyle(color: JokarzColors.textSecondary, fontSize: 12),
+                                style: TextStyle(
+                                  color: JokarzColors.textSecondary,
+                                  fontSize: 12,
+                                ),
                               ),
                               const SizedBox(height: 14),
                               ElevatedButton(
-                                onPressed: _checkPermissionsAndInitCamera,
+                                onPressed: _checkPermissionsAndStart,
                                 child: const Text('Grant Camera Permission'),
                               ),
                             ],
                           ),
                         ),
                       )
-                    else if (_errorMessage != null)
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.videocam_off, size: 44, color: JokarzColors.crimson),
-                              const SizedBox(height: 10),
-                              Text(
-                                _errorMessage!,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 13),
-                              ),
-                              const SizedBox(height: 12),
-                              ElevatedButton.icon(
-                                icon: const Icon(Icons.refresh, size: 18),
-                                label: const Text('Retry Camera'),
-                                onPressed: _initCamera,
-                              ),
-                            ],
-                          ),
-                        ),
-                      )
                     else
-                      const Center(
+                      Center(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            CircularProgressIndicator(color: JokarzColors.gold),
-                            SizedBox(height: 14),
+                            const CircularProgressIndicator(color: JokarzColors.gold),
+                            const SizedBox(height: 14),
                             Text(
-                              'CONNECTING TABLETOP CAMERA...',
+                              _errorMessage ?? 'STARTING TABLETOP CAMERA...',
                               textAlign: TextAlign.center,
-                              style: TextStyle(color: JokarzColors.gold, fontWeight: FontWeight.bold, fontSize: 12),
+                              style: TextStyle(
+                                color: _errorMessage != null
+                                    ? JokarzColors.crimson
+                                    : JokarzColors.gold,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
                             ),
                           ],
                         ),
                       ),
 
                     // Framing Alignment Grid Overlay
-                    if (_showAlignmentGrid && _isCameraInitialized)
+                    if (_showAlignmentGrid && isLive)
                       IgnorePointer(
                         child: CustomPaint(
                           painter: _TableAlignmentGridPainter(),
@@ -533,12 +339,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 5),
                             decoration: BoxDecoration(
                               color: Colors.black.withAlpha(220),
                               borderRadius: BorderRadius.circular(20),
                               border: Border.all(
-                                color: _server.currentFps > 0 ? JokarzColors.emerald : JokarzColors.crimson,
+                                color: isLive
+                                    ? JokarzColors.emerald
+                                    : JokarzColors.crimson,
                               ),
                             ),
                             child: Row(
@@ -547,17 +356,23 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                                   width: 8,
                                   height: 8,
                                   decoration: BoxDecoration(
-                                    color: _server.currentFps > 0 ? JokarzColors.emerald : JokarzColors.crimson,
+                                    color: isLive
+                                        ? JokarzColors.emerald
+                                        : JokarzColors.crimson,
                                     shape: BoxShape.circle,
                                   ),
                                 ),
                                 const SizedBox(width: 6),
                                 Text(
-                                  _server.currentFps > 0 ? 'CRISP LIVE STREAM' : 'STARTING SENSOR',
+                                  isLive
+                                      ? 'H.264 WEBRTC LIVE'
+                                      : 'STARTING SENSOR',
                                   style: TextStyle(
                                     fontSize: 10,
                                     fontWeight: FontWeight.w900,
-                                    color: _server.currentFps > 0 ? JokarzColors.emerald : JokarzColors.crimson,
+                                    color: isLive
+                                        ? JokarzColors.emerald
+                                        : JokarzColors.crimson,
                                     letterSpacing: 1,
                                   ),
                                 ),
@@ -568,22 +383,27 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                             children: [
                               IconButton(
                                 icon: Icon(
-                                  _isFullScreenPreview ? Icons.fullscreen_exit : Icons.fullscreen,
+                                  _isFullScreenPreview
+                                      ? Icons.fullscreen_exit
+                                      : Icons.fullscreen,
                                   color: JokarzColors.gold,
                                   size: 22,
                                 ),
                                 tooltip: 'Expand Viewfinder',
-                                onPressed: () => setState(() => _isFullScreenPreview = !_isFullScreenPreview),
+                                onPressed: () => setState(
+                                    () => _isFullScreenPreview =
+                                        !_isFullScreenPreview),
                               ),
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 10, vertical: 5),
                                 decoration: BoxDecoration(
                                   color: Colors.black.withAlpha(220),
                                   borderRadius: BorderRadius.circular(20),
                                   border: Border.all(color: JokarzColors.gold),
                                 ),
                                 child: Text(
-                                  '${_server.currentFps} FPS',
+                                  '$fps FPS',
                                   style: const TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w900,
@@ -599,48 +419,37 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     ),
 
                     // Bottom Viewfinder Floating Controls
-                    Positioned(
-                      bottom: 12,
-                      left: 12,
-                      right: 12,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          // Table Spotlight Torch Toggle
-                          FloatingActionButton.small(
-                            heroTag: 'torchBtn',
-                            backgroundColor: _torchOn ? JokarzColors.gold : Colors.black87,
-                            foregroundColor: _torchOn ? Colors.black : JokarzColors.gold,
-                            onPressed: () => _setTorch(!_torchOn),
-                            tooltip: 'Toggle Table Spotlight (Flash)',
-                            child: Icon(_torchOn ? Icons.flashlight_on : Icons.flashlight_off),
-                          ),
-                          // Instant Replay Test Trigger
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: JokarzColors.crimson,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    if (isLive)
+                      Positioned(
+                        bottom: 12,
+                        left: 12,
+                        right: 12,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            FloatingActionButton.small(
+                              heroTag: 'torchBtn',
+                              backgroundColor:
+                                  _torchOn ? JokarzColors.gold : Colors.black87,
+                              foregroundColor:
+                                  _torchOn ? Colors.black : JokarzColors.gold,
+                              onPressed: () => _setTorch(!_torchOn),
+                              tooltip: 'Toggle Table Spotlight (Flash)',
+                              child: Icon(_torchOn
+                                  ? Icons.flashlight_on
+                                  : Icons.flashlight_off),
                             ),
-                            icon: const Icon(Icons.slow_motion_video, size: 16),
-                            label: const Text(
-                              'TEST SLOW-MO',
-                              style: TextStyle(fontWeight: FontWeight.w900, fontSize: 11),
+                            FloatingActionButton.small(
+                              heroTag: 'flipBtn',
+                              backgroundColor: Colors.black87,
+                              foregroundColor: JokarzColors.gold,
+                              onPressed: _flipCamera,
+                              tooltip: 'Flip Lens',
+                              child: const Icon(Icons.flip_camera_ios),
                             ),
-                            onPressed: _openReplayTester,
-                          ),
-                          // Flip Camera Button
-                          FloatingActionButton.small(
-                            heroTag: 'flipBtn',
-                            backgroundColor: Colors.black87,
-                            foregroundColor: JokarzColors.gold,
-                            onPressed: _flipCamera,
-                            tooltip: 'Flip Lens',
-                            child: const Icon(Icons.flip_camera_ios),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
-                    ),
                   ],
                 ),
               ),
@@ -657,110 +466,23 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 ),
                 child: Row(
                   children: [
-                    Expanded(
-                      child: InkWell(
-                        onTap: () {
-                          if (_qualityPreset != VideoQualityPreset.ultra4k1080p) {
-                            setState(() => _qualityPreset = VideoQualityPreset.ultra4k1080p);
-                            if (_availableCameras.isNotEmpty) {
-                              _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-                            }
-                          }
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? JokarzColors.gold : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.four_k, size: 16, color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? Colors.black : JokarzColors.textSecondary),
-                              const SizedBox(width: 4),
-                              Text(
-                                '💎 4K / 1080p CRISP',
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: _qualityPreset == VideoQualityPreset.ultra4k1080p ? Colors.black : JokarzColors.textSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                    _presetPill(
+                      VideoQualityPreset.ultra4k1080p,
+                      Icons.four_k,
+                      '💎 4K / 1080p CRISP',
+                      JokarzColors.gold,
                     ),
-                    Expanded(
-                      child: InkWell(
-                        onTap: () {
-                          if (_qualityPreset != VideoQualityPreset.highSpeed60) {
-                            setState(() => _qualityPreset = VideoQualityPreset.highSpeed60);
-                            if (_availableCameras.isNotEmpty) {
-                              _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-                            }
-                          }
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: _qualityPreset == VideoQualityPreset.highSpeed60 ? JokarzColors.crimson : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.bolt, size: 16, color: Colors.white),
-                              SizedBox(width: 4),
-                              Text(
-                                '🚀 60 FPS TURBO',
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                    _presetPill(
+                      VideoQualityPreset.highSpeed60,
+                      Icons.bolt,
+                      '🚀 60 FPS TURBO',
+                      JokarzColors.crimson,
                     ),
-                    Expanded(
-                      child: InkWell(
-                        onTap: () {
-                          if (_qualityPreset != VideoQualityPreset.balanced720p) {
-                            setState(() => _qualityPreset = VideoQualityPreset.balanced720p);
-                            if (_availableCameras.isNotEmpty) {
-                              _startCameraInstance(_availableCameras[_selectedCameraIndex]);
-                            }
-                          }
-                        },
-                        borderRadius: BorderRadius.circular(10),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          decoration: BoxDecoration(
-                            color: _qualityPreset == VideoQualityPreset.balanced720p ? JokarzColors.emerald : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.speed, size: 16, color: _qualityPreset == VideoQualityPreset.balanced720p ? Colors.black : JokarzColors.textSecondary),
-                              const SizedBox(width: 4),
-                              Text(
-                                '⚡ 720p FAST',
-                                style: TextStyle(
-                                  fontSize: 10.5,
-                                  fontWeight: FontWeight.w900,
-                                  color: _qualityPreset == VideoQualityPreset.balanced720p ? Colors.black : JokarzColors.textSecondary,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
+                    _presetPill(
+                      VideoQualityPreset.balanced720p,
+                      Icons.speed,
+                      '⚡ 720p FAST',
+                      JokarzColors.emerald,
                     ),
                   ],
                 ),
@@ -781,7 +503,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                       icon: const Icon(Icons.qr_code_scanner, size: 20),
                       label: const Text(
                         '1-Sec QR Pair',
-                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.8),
+                        style: TextStyle(
+                            fontWeight: FontWeight.w900, letterSpacing: 0.8),
                       ),
                       onPressed: _showQrDialog,
                     ),
@@ -791,13 +514,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     child: OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
                         foregroundColor: JokarzColors.emerald,
-                        side: const BorderSide(color: JokarzColors.emerald, width: 1.5),
+                        side: const BorderSide(
+                            color: JokarzColors.emerald, width: 1.5),
                         padding: const EdgeInsets.symmetric(vertical: 14),
                       ),
                       icon: const Icon(Icons.wifi_tethering, size: 20),
                       label: const Text(
                         '0-Router Guide',
-                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.8),
+                        style: TextStyle(
+                            fontWeight: FontWeight.w900, letterSpacing: 0.8),
                       ),
                       onPressed: _showOfflineHotspotGuide,
                     ),
@@ -818,9 +543,11 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildStatItem('Active Viewers', '${_server.activeViewers}', Icons.people),
-                    _buildStatItem('DVR Buffer', '${_localDvr.totalBufferedFrames} Frames', Icons.memory),
-                    _buildStatItem('Uptime', _formatTime(_secondsStreaming), Icons.timer),
+                    _buildStatItem(
+                        'Active Viewers', '${_eye.viewerCount}', Icons.people),
+                    _buildStatItem('Codec', 'H.264', Icons.memory),
+                    _buildStatItem(
+                        'Uptime', _formatTime(_secondsStreaming), Icons.timer),
                   ],
                 ),
               ),
@@ -838,7 +565,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         Icon(Icons.wifi, color: JokarzColors.gold, size: 20),
                         SizedBox(width: 8),
                         Text(
-                          'DIRECT WI-FI STREAM URL',
+                          'DIRECT WI-FI WEBRTC SIGNAL URL',
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
@@ -850,7 +577,8 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     ),
                     const SizedBox(height: 10),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
                       decoration: BoxDecoration(
                         color: JokarzColors.background,
                         borderRadius: BorderRadius.circular(8),
@@ -860,7 +588,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                         children: [
                           Expanded(
                             child: Text(
-                              streamUrl,
+                              signalUrl,
                               style: const TextStyle(
                                 fontFamily: 'monospace',
                                 color: JokarzColors.emerald,
@@ -870,13 +598,15 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                             ),
                           ),
                           IconButton(
-                            icon: const Icon(Icons.copy, size: 18, color: JokarzColors.gold),
+                            icon: const Icon(Icons.copy,
+                                size: 18, color: JokarzColors.gold),
                             tooltip: 'Copy URL',
                             onPressed: () {
-                              Clipboard.setData(ClipboardData(text: streamUrl));
+                              Clipboard.setData(
+                                  ClipboardData(text: signalUrl));
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                  content: Text('Stream URL copied to clipboard!'),
+                                  content: Text('Signal URL copied to clipboard!'),
                                   backgroundColor: JokarzColors.emeraldDark,
                                 ),
                               );
@@ -887,7 +617,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      '📡 Auto-discovery beacon active on UDP:45454. The table controller app will link automatically.',
+                      '📡 Auto-discovery beacon active on UDP:45454. The table controller app links automatically over WebRTC (hardware H.264).',
                       style: TextStyle(fontSize: 11, color: JokarzColors.textSecondary),
                     ),
                   ],
@@ -926,12 +656,50 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
                             max: _maxZoom,
                             divisions: 20,
                             activeColor: JokarzColors.gold,
-                            onChanged: (val) => _setZoom(val),
+                            onChanged: _setZoom,
                           ),
                         ),
                       ],
                     ),
                   ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _presetPill(
+    VideoQualityPreset preset,
+    IconData icon,
+    String label,
+    Color activeColor,
+  ) {
+    final isActive = _qualityPreset == preset;
+    final fg = isActive ? Colors.black : JokarzColors.textSecondary;
+    return Expanded(
+      child: InkWell(
+        onTap: () => _applyPreset(preset),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: isActive ? activeColor : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 16, color: fg),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w900,
+                  color: fg,
                 ),
               ),
             ],
@@ -956,10 +724,7 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
         ),
         Text(
           label,
-          style: const TextStyle(
-            fontSize: 11,
-            color: JokarzColors.textSecondary,
-          ),
+          style: const TextStyle(fontSize: 11, color: JokarzColors.textSecondary),
         ),
       ],
     );

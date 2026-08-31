@@ -1,4 +1,9 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 import '../../constants/app_theme.dart';
 import '../../services/sound_effects_service.dart';
@@ -21,10 +26,48 @@ class _VarStationScreenState extends State<VarStationScreen> {
   BoxFit _videoFit = BoxFit.cover; // Default: 100% Full Screen Edge-to-Edge Fill
   int _rotationQuarterTurns = 0; // Manual rotation support (0, 90, 180, 270 deg)
 
+  // Instant-replay DVR is fed from periodic snapshots of the rendered WebRTC
+  // view (flutter_webrtc does not expose per-frame bytes on the receive side).
+  final GlobalKey _dvrCaptureKey = GlobalKey();
+  Timer? _dvrTimer;
+  bool _isCapturing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _dvrTimer = Timer.periodic(const Duration(milliseconds: 150), (_) {
+      _captureDvrFrame();
+    });
+  }
+
   @override
   void dispose() {
+    _dvrTimer?.cancel();
     _transformController.dispose();
     super.dispose();
+  }
+
+  Future<void> _captureDvrFrame() async {
+    if (!mounted || _isCapturing) return;
+    final varProvider = context.read<VarReplayProvider>();
+    if (!varProvider.isConnected || varProvider.isReplayActive) return;
+    final boundary = _dvrCaptureKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null || !boundary.hasSize) return;
+    _isCapturing = true;
+    try {
+      final image = await boundary.toImage(pixelRatio: 0.5);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      if (byteData != null) {
+        varProvider.streamClient.addDvrFrame(
+            byteData.buffer.asUint8List());
+      }
+    } catch (_) {
+      // Capture can fail mid-frame; ignore and try again next tick.
+    } finally {
+      _isCapturing = false;
+    }
   }
 
   void _openDeviceScanner() {
@@ -336,22 +379,39 @@ class _VarStationScreenState extends State<VarStationScreen> {
     double viewportW,
     double viewportH,
   ) {
-    final frameBytes = varProvider.currentFrameBytes;
-
-    if (frameBytes != null && frameBytes.isNotEmpty) {
-      return FittedBox(
-        fit: _videoFit,
-        clipBehavior: Clip.antiAlias,
-        child: SizedBox(
-          width: viewportW,
-          height: viewportH,
-          child: Image.memory(
-            frameBytes,
-            gaplessPlayback: true,
-            fit: _videoFit,
-            filterQuality: FilterQuality.high,
-            errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
+    // In replay mode, show the captured replay frames (PNG/JPEG stills).
+    if (varProvider.isReplayActive) {
+      final frameBytes = varProvider.currentFrameBytes;
+      if (frameBytes != null && frameBytes.isNotEmpty) {
+        return FittedBox(
+          fit: _videoFit,
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(
+            width: viewportW,
+            height: viewportH,
+            child: Image.memory(
+              frameBytes,
+              gaplessPlayback: true,
+              fit: _videoFit,
+              filterQuality: FilterQuality.high,
+              errorBuilder: (_, __, ___) => _buildPlaceholderFeed(varProvider),
+            ),
           ),
+        );
+      }
+      return _buildPlaceholderFeed(varProvider);
+    }
+
+    // Live mode: hardware-decoded WebRTC video (also captured for the DVR).
+    final renderer = varProvider.streamClient.remoteRenderer;
+    if (varProvider.isConnected && renderer != null) {
+      return RepaintBoundary(
+        key: _dvrCaptureKey,
+        child: RTCVideoView(
+          renderer,
+          objectFit: _videoFit == BoxFit.cover
+              ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover
+              : RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
         ),
       );
     }
@@ -435,7 +495,7 @@ class _VarStationScreenState extends State<VarStationScreen> {
           Text(
             isReplay
                 ? 'VAR REPLAY (${varProvider.totalBufferedFrames}f)'
-                : '1080p FULL SCREEN • ${varProvider.currentFps} FPS',
+                : 'WEBRTC LIVE • ${varProvider.currentFps} FPS',
             style: TextStyle(
               color: isReplay ? JokarzColors.crimson : JokarzColors.emerald,
               fontSize: 11,
