@@ -131,8 +131,19 @@ class VarReplayProvider extends ChangeNotifier {
   }
 
   // --- VAR Instant Replay Controls ---
-  void enterReplayMode() {
+  Future<void> enterReplayMode() async {
     SoundEffectsService.playVarWhistle();
+    // Pull the Eye's always-rolling buffer so we can rewind what was recorded
+    // on the Eye even before the Table connected (the "after the fact" look back).
+    if (_streamClient.isConnected) {
+      final frames = await _streamClient.fetchReplayBuffer();
+      if (frames.isNotEmpty) {
+        _dvrManager.clear();
+        for (final f in frames) {
+          _dvrManager.pushFrame(f);
+        }
+      }
+    }
     _dvrManager.enterReplayMode();
   }
 

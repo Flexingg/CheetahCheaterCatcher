@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import '../constants/app_constants.dart';
 
@@ -18,6 +19,11 @@ class MjpegCameraServer {
   int _currentFps = 0;
   Timer? _fpsTimer;
 
+  // Rolling high-fps replay buffer: every JPEG frame injected is kept so a
+  // remote Table can pull it and rewind in slow-mo after the fact.
+  final List<Uint8List> _replayFrames = [];
+  final int _maxReplayFrames = 600; // ~10s @ 60fps
+
   bool _isTorchOn = false;
   double _zoomLevel = 1.0;
   bool _isFrontCamera = false;
@@ -27,6 +33,8 @@ class MjpegCameraServer {
   bool get isRunning => _httpServer != null;
   int get activeViewers => _mjpegClients.length + _binaryWsClients.length;
   int get currentFps => _currentFps;
+  int get replayFrameCount => _replayFrames.length;
+  List<Uint8List> get replayFrames => List.unmodifiable(_replayFrames);
   bool get isTorchOn => _isTorchOn;
   double get zoomLevel => _zoomLevel;
   bool get isFrontCamera => _isFrontCamera;
@@ -145,6 +153,26 @@ class MjpegCameraServer {
         response.statusCode = HttpStatus.notFound;
       }
       await response.close();
+    } else if (path == '/replay') {
+      // Serve the whole rolling high-fps buffer, framed so the Table can split
+      // it back into individual JPEGs: 4-byte big-endian length + jpeg bytes.
+      final response = request.response;
+      response.statusCode = HttpStatus.ok;
+      response.headers.contentType = ContentType('application', 'octet-stream');
+      response.headers.set('X-Frame-Count', '${_replayFrames.length}');
+      response.headers.set('X-Fps', '$_currentFps');
+      final builder = BytesBuilder(copy: false);
+      for (final frame in _replayFrames) {
+        builder.add([
+          (frame.length >> 24) & 0xff,
+          (frame.length >> 16) & 0xff,
+          (frame.length >> 8) & 0xff,
+          frame.length & 0xff,
+        ]);
+        builder.add(frame);
+      }
+      response.add(builder.takeBytes());
+      await response.close();
     } else if (path == '/status') {
       final response = request.response;
       response.statusCode = HttpStatus.ok;
@@ -231,6 +259,12 @@ class MjpegCameraServer {
   void injectFrame(Uint8List jpegBytes) {
     _latestFrame = jpegBytes;
     _fpsCounter++;
+
+    // Rolling replay buffer (always recording so the Table can rewind later)
+    _replayFrames.add(jpegBytes);
+    if (_replayFrames.length > _maxReplayFrames) {
+      _replayFrames.removeAt(0);
+    }
 
     // 1. Binary WebSockets (Ultra-fast direct dispatch)
     if (_binaryWsClients.isNotEmpty) {

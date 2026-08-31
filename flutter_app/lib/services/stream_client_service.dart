@@ -1,38 +1,25 @@
 import 'dart:async';
 import 'dart:convert';
-
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
-
 import '../models/camera_device_info.dart';
 
 typedef FrameCallback = void Function(Uint8List frame);
 
-/// The Jokarz Table (viewer) WebRTC client.
-///
-/// Connects to a Jokarz Eye over local Wi-Fi using WebRTC (hardware H.264
-/// decode). Signaling is a simple offer/answer HTTP exchange against the Eye's
-/// signaling server, with non-trickle ICE (all candidates gathered before the
-/// answer is returned) so no separate candidate channel is needed.
-///
-/// Keeps the same public surface as the legacy MJPEG client so
-/// [VarReplayProvider] and the UI are largely unchanged. Live video is exposed
-/// via [remoteRenderer]; the instant-replay DVR is fed through [addDvrFrame]
-/// from snapshots captured off the rendered view.
 class StreamClientService {
-  RTCVideoRenderer? _remoteRenderer;
-  RTCPeerConnection? _pc;
-  RTCDataChannel? _controlChannel;
-  Timer? _fpsTimer;
+  WebSocket? _binaryStreamSocket;
+  http.Client? _httpClient;
+  WebSocket? _controlSocket;
+  StreamSubscription? _streamSubscription;
   Timer? _reconnectTimer;
+  Timer? _fpsTimer;
 
   bool _isConnected = false;
   CameraDeviceInfo? _connectedDevice;
   int _receivedFramesCount = 0;
   int _currentFps = 0;
-  String? _offerSdp;
-  String? _sessionId;
 
   final StreamController<Uint8List> _frameStreamController =
       StreamController<Uint8List>.broadcast();
@@ -40,16 +27,45 @@ class StreamClientService {
       StreamController<Map<String, dynamic>>.broadcast();
 
   Stream<Uint8List> get frameStream => _frameStreamController.stream;
-  Stream<Map<String, dynamic>> get telemetryStream =>
-      _telemetryController.stream;
+  Stream<Map<String, dynamic>> get telemetryStream => _telemetryController.stream;
   bool get isConnected => _isConnected;
   int get currentFps => _currentFps;
   CameraDeviceInfo? get connectedDevice => _connectedDevice;
-  RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
 
-  /// Connect to a Jokarz Eye via WebRTC offer/answer over HTTP.
+  /// Pull the Eye's always-rolling high-fps replay buffer (recorded on the Eye
+  /// regardless of whether the Table is connected). Returns individual JPEGs.
+  Future<List<Uint8List>> fetchReplayBuffer() async {
+    final device = _connectedDevice;
+    if (device == null) return [];
+    try {
+      final url = 'http://${device.ip}:${device.streamPort}/replay';
+      final res = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 6));
+      if (res.statusCode != 200) return [];
+      final body = res.bodyBytes;
+      final frames = <Uint8List>[];
+      var offset = 0;
+      while (offset + 4 <= body.length) {
+        final len = (body[offset] << 24) |
+            (body[offset + 1] << 16) |
+            (body[offset + 2] << 8) |
+            body[offset + 3];
+        if (len <= 0 || offset + 4 + len > body.length) break;
+        frames.add(Uint8List.sublistView(body, offset + 4, offset + 4 + len));
+        offset += 4 + len;
+      }
+      debugPrint('[StreamClient] Fetched ${frames.length} replay frames');
+      return frames;
+    } catch (e) {
+      debugPrint('[StreamClient] Failed to fetch replay buffer: $e');
+      return [];
+    }
+  }
+
+  /// Connect to camera device using ultra-low latency binary WebSocket (with HTTP MJPEG fallback)
   Future<void> connect(CameraDeviceInfo device) async {
-    await disconnect();
+    disconnect();
     _connectedDevice = device;
 
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -57,130 +73,132 @@ class StreamClientService {
       _receivedFramesCount = 0;
     });
 
+    _connectBinaryWsStream(device);
+    _connectControlWs(device);
+  }
+
+  void _connectBinaryWsStream(CameraDeviceInfo device) async {
+    final wsStreamUrl = 'ws://${device.ip}:${device.streamPort}/ws/live';
+    debugPrint('[StreamClient] Connecting to binary stream at $wsStreamUrl');
+
     try {
-      _remoteRenderer = RTCVideoRenderer();
-      await _remoteRenderer!.initialize();
-
-      _pc = await createPeerConnection(const {
-        'iceServers': [
-          {'urls': ['stun:stun.l.google.com:19302']},
-        ],
-        'sdpSemantics': 'unified-plan',
-      });
-
-      _pc!.onTrack = (event) {
-        if (event.streams.isNotEmpty) {
-          _remoteRenderer?.srcObject = event.streams[0];
-        }
-      };
-      _pc!.onDataChannel = (channel) {
-        _bindControlChannel(channel);
-      };
-      _pc!.onIceGatheringState = (_) {};
-
-      // 1. Fetch the Eye's offer (it also creates the control data channel).
-      final offerRes = await http
-          .get(Uri.parse(
-              'http://${device.ip}:${device.streamPort}/webrtc/offer'))
-          .timeout(const Duration(seconds: 8));
-      if (offerRes.statusCode != 200) {
-        throw Exception('Eye offer failed (HTTP ${offerRes.statusCode})');
-      }
-      final offerBody = jsonDecode(offerRes.body) as Map<String, dynamic>;
-      _sessionId = offerBody['sessionId'] as String?;
-      _offerSdp = offerBody['sdp'] as String?;
-
-      await _pc!.setRemoteDescription(RTCSessionDescription(_offerSdp!, 'offer'));
-
-      // 2. Build our answer (gather all candidates first — non-trickle).
-      final answer = await _pc!.createAnswer();
-      await _pc!.setLocalDescription(answer);
-      await _waitForGatheringComplete();
-
-      final localDesc = await _pc!.getLocalDescription();
-      final answerRes = await http
-          .post(
-            Uri.parse(
-                'http://${device.ip}:${device.streamPort}/webrtc/answer'),
-            headers: {'content-type': 'application/json'},
-            body: jsonEncode({
-              'sessionId': _sessionId,
-              'sdp': localDesc?.sdp ?? answer.sdp,
-            }),
-          )
-          .timeout(const Duration(seconds: 8));
-      if (answerRes.statusCode != 200 && answerRes.statusCode != 404) {
-        throw Exception('Eye answer failed (HTTP ${answerRes.statusCode})');
-      }
-
+      _binaryStreamSocket = await WebSocket.connect(wsStreamUrl).timeout(
+        const Duration(seconds: 4),
+      );
       _isConnected = true;
-      debugPrint('[StreamClient] WebRTC connected to ${device.ip}');
+      debugPrint('[StreamClient] Connected to binary live WebSocket!');
+
+      _binaryStreamSocket?.listen(
+        (data) {
+          if (data is List<int>) {
+            _receivedFramesCount++;
+            final frameBytes = data is Uint8List ? data : Uint8List.fromList(data);
+            _frameStreamController.add(frameBytes);
+          } else if (data is String) {
+            try {
+              final json = jsonDecode(data) as Map<String, dynamic>;
+              _telemetryController.add(json);
+            } catch (_) {}
+          }
+        },
+        onDone: () {
+          debugPrint('[StreamClient] Binary WS stream closed, falling back to HTTP...');
+          _binaryStreamSocket = null;
+          _handleStreamDrop();
+        },
+        onError: (err) {
+          debugPrint('[StreamClient] Binary WS error: $err');
+          _binaryStreamSocket = null;
+          _handleStreamDrop();
+        },
+        cancelOnError: true,
+      );
     } catch (e) {
-      debugPrint('[StreamClient] WebRTC connect failed: $e');
-      await disconnect();
-      rethrow;
+      debugPrint('[StreamClient] WS connection failed ($e), falling back to HTTP MJPEG...');
+      _connectHttpStream(device);
     }
   }
 
-  Future<void> _waitForGatheringComplete() async {
-    final completer = Completer<void>();
-    final pc = _pc;
-    if (pc == null) return;
-    void check() {
-      if (pc.iceGatheringState ==
-          RTCIceGatheringState.RTCIceGatheringStateComplete) {
-        if (!completer.isCompleted) completer.complete();
-      }
-    }
+  void _connectHttpStream(CameraDeviceInfo device) async {
+    try {
+      _httpClient = http.Client();
+      final request = http.Request('GET', Uri.parse(device.streamUrl));
+      request.headers['Connection'] = 'keep-alive';
+      request.headers['Accept'] = '*/*';
 
-    pc.onIceGatheringState = (state) {
-      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
-          !completer.isCompleted) {
-        completer.complete();
+      final response = await _httpClient!.send(request);
+
+      if (response.statusCode == 200) {
+        _isConnected = true;
+        final buffer = BytesBuilder(copy: false);
+
+        _streamSubscription = response.stream.listen(
+          (chunk) {
+            buffer.add(chunk);
+            final currentBytes = buffer.toBytes();
+
+            // Extract frames by boundary or SOI/EOI
+            final frames = _extractJpegFrames(currentBytes);
+            if (frames.extractedFrames.isNotEmpty) {
+              buffer.clear();
+              if (frames.lastRemainder.isNotEmpty) {
+                buffer.add(frames.lastRemainder);
+              }
+
+              for (final frame in frames.extractedFrames) {
+                _receivedFramesCount++;
+                _frameStreamController.add(frame);
+              }
+            }
+          },
+          onError: (err) {
+            debugPrint('[StreamClient] HTTP Stream error: $err');
+            _handleStreamDrop();
+          },
+          onDone: () {
+            debugPrint('[StreamClient] HTTP Stream finished');
+            _handleStreamDrop();
+          },
+          cancelOnError: true,
+        );
+      } else {
+        _handleStreamDrop();
       }
-    };
-    check();
-    // Safety fallback: don't block forever if gathering is already done.
-    Timer(const Duration(seconds: 4), () {
-      if (!completer.isCompleted) completer.complete();
-    });
-    await completer.future;
+    } catch (e) {
+      debugPrint('[StreamClient] Failed to connect HTTP stream: $e');
+      _handleStreamDrop();
+    }
   }
 
-  void _bindControlChannel(RTCDataChannel channel) {
-    _controlChannel = channel;
-    channel.onMessage = (msg) {
-      if (msg.isBinary) return;
-      try {
-        final json = jsonDecode(msg.text) as Map<String, dynamic>;
-        if (json['type'] == 'telemetry') {
-          _telemetryController.add(json);
+  void _connectControlWs(CameraDeviceInfo device) async {
+    try {
+      _controlSocket = await WebSocket.connect(device.controlWsUrl).timeout(
+        const Duration(seconds: 4),
+      );
+      _controlSocket?.listen((message) {
+        if (message is String) {
+          try {
+            final json = jsonDecode(message) as Map<String, dynamic>;
+            _telemetryController.add(json);
+          } catch (_) {}
         }
-      } catch (_) {}
-    };
-    channel.onDataChannelState = (state) {
-      if (state == RTCDataChannelState.RTCDataChannelClosed) {
-        _controlChannel = null;
-      }
-    };
-  }
-
-  /// Feeds a captured frame (e.g. a snapshot of the rendered view) into the
-  /// instant-replay DVR. Mirrors the old per-frame JPEG stream.
-  void addDvrFrame(Uint8List frameBytes) {
-    if (frameBytes.isEmpty || !_isConnected) return;
-    _receivedFramesCount++;
-    _frameStreamController.add(frameBytes);
+      }, onDone: () {
+        _controlSocket = null;
+      }, onError: (_) {
+        _controlSocket = null;
+      });
+    } catch (e) {
+      debugPrint('WS control connection failed (optional): $e');
+    }
   }
 
   void sendControlCommand(String action, dynamic value) {
-    final ch = _controlChannel;
-    if (ch != null && ch.state == RTCDataChannelState.RTCDataChannelOpen) {
+    if (_controlSocket != null && _controlSocket?.readyState == WebSocket.open) {
       try {
-        ch.send(RTCDataChannelMessage(
-            jsonEncode({'action': action, 'value': value})));
+        final payload = jsonEncode({'action': action, 'value': value});
+        _controlSocket?.add(payload);
       } catch (e) {
-        debugPrint('[StreamClient] control send error: $e');
+        debugPrint('Error sending WS control command: $e');
       }
     }
   }
@@ -197,34 +215,68 @@ class StreamClientService {
     sendControlCommand('flip_camera', true);
   }
 
-  Future<void> disconnect() async {
+  void _handleStreamDrop() {
+    _isConnected = false;
+    _reconnectTimer?.cancel();
+    if (_connectedDevice != null) {
+      _reconnectTimer = Timer(const Duration(seconds: 2), () {
+        if (_connectedDevice != null && !_isConnected) {
+          debugPrint('Attempting stream reconnection...');
+          _connectBinaryWsStream(_connectedDevice!);
+        }
+      });
+    }
+  }
+
+  static _JpegExtractionResult _extractJpegFrames(Uint8List data) {
+    final frames = <Uint8List>[];
+    int start = -1;
+
+    for (int i = 0; i < data.length - 1; i++) {
+      // SOI: 0xFF, 0xD8
+      if (data[i] == 0xFF && data[i + 1] == 0xD8) {
+        start = i;
+      }
+      // EOI: 0xFF, 0xD9
+      else if (data[i] == 0xFF && data[i + 1] == 0xD9 && start != -1) {
+        final end = i + 2;
+        frames.add(Uint8List.sublistView(data, start, end));
+        start = -1;
+      }
+    }
+
+    Uint8List remainder = Uint8List(0);
+    if (start != -1 && start < data.length) {
+      remainder = Uint8List.sublistView(data, start);
+    }
+
+    return _JpegExtractionResult(frames, remainder);
+  }
+
+  void disconnect() {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _fpsTimer?.cancel();
     _fpsTimer = null;
 
+    try {
+      _binaryStreamSocket?.close();
+    } catch (_) {}
+    _binaryStreamSocket = null;
+
+    _streamSubscription?.cancel();
+    _streamSubscription = null;
+
+    _httpClient?.close();
+    _httpClient = null;
+
+    try {
+      _controlSocket?.close();
+    } catch (_) {}
+    _controlSocket = null;
+
     _isConnected = false;
     _connectedDevice = null;
-    _offerSdp = null;
-    _sessionId = null;
-
-    try {
-      _controlChannel?.close();
-    } catch (_) {}
-    _controlChannel = null;
-
-    try {
-      await _pc?.close();
-    } catch (_) {}
-    _pc = null;
-
-    final renderer = _remoteRenderer;
-    _remoteRenderer = null;
-    if (renderer != null) {
-      try {
-        await renderer.dispose();
-      } catch (_) {}
-    }
   }
 
   void dispose() {
@@ -232,4 +284,11 @@ class StreamClientService {
     _frameStreamController.close();
     _telemetryController.close();
   }
+}
+
+class _JpegExtractionResult {
+  final List<Uint8List> extractedFrames;
+  final Uint8List lastRemainder;
+
+  _JpegExtractionResult(this.extractedFrames, this.lastRemainder);
 }
