@@ -14,6 +14,7 @@ class DvrReplayManager extends ChangeNotifier {
   double _playbackSpeed = 1.0;
   int _currentScrubIndex = 0;
   List<ReplayFrame> _frozenBuffer = [];
+  int _captureFps = 30;
 
   Timer? _playbackTimer;
 
@@ -24,7 +25,16 @@ class DvrReplayManager extends ChangeNotifier {
   double get playbackSpeed => _playbackSpeed;
   int get currentScrubIndex => _currentScrubIndex;
   int get totalBufferedFrames => _isReplayActive ? _frozenBuffer.length : _ringBuffer.length;
-  double get bufferDurationSeconds => (_ringBuffer.length / 30.0);
+  int get captureFps => _captureFps;
+  double get bufferDurationSeconds => (_ringBuffer.length / _captureFps);
+
+  /// Set the actual capture frame rate (from the host's telemetry) so replay
+  /// playback speed + duration reflect reality instead of assuming 30fps.
+  void setCaptureFps(int fps) {
+    if (fps > 0) {
+      _captureFps = fps;
+    }
+  }
 
   ReplayFrame? get currentFrame {
     if (_isReplayActive && _frozenBuffer.isNotEmpty) {
@@ -138,8 +148,9 @@ class DvrReplayManager extends ChangeNotifier {
 
   void _startPlaybackTimer() {
     _playbackTimer?.cancel();
-    // Base 30 FPS = ~33.3ms per frame
-    final intervalMs = (33.33 / _playbackSpeed).round().clamp(5, 1000);
+    // One frame per capture interval; speed scales the interval. e.g. at
+    // 60fps a "1x" replay advances a real 60fps frame every 16.7ms.
+    final intervalMs = ((1000 / _captureFps) / _playbackSpeed).round().clamp(5, 1000);
     _playbackTimer = Timer.periodic(Duration(milliseconds: intervalMs), (_) {
       if (_currentScrubIndex < _frozenBuffer.length - 1) {
         _currentScrubIndex++;

@@ -19,10 +19,11 @@ class ReplayScrubberWidget extends StatelessWidget {
     final totalFrames = varProvider.totalBufferedFrames;
     final currentIndex = varProvider.currentScrubIndex;
     final progress = totalFrames > 1 ? currentIndex / (totalFrames - 1) : 0.0;
+    final fps = varProvider.captureFps > 0 ? varProvider.captureFps : 30.0;
 
-    // Time calculation (approx 30fps)
-    final currentSeconds = (currentIndex / 30.0);
-    final totalSeconds = (totalFrames / 30.0);
+    // Time based on the actual capture frame rate
+    final currentSeconds = (currentIndex / fps);
+    final totalSeconds = (totalFrames / fps);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),

@@ -17,9 +17,9 @@ import '../widgets/poker_card_widgets.dart';
 import '../widgets/qr_pairing_dialog.dart';
 
 enum VideoQualityPreset {
-  ultra4k1080p, // Full resolution 1080p / 4K crisp
-  highSpeed60,  // 1080p 60 FPS Turbo
-  balanced720p, // 720p Smooth
+  ultra4k1080p, // Full resolution 1080p crisp @ 30fps
+  highSpeed60,  // 480p 60 FPS Turbo (sustained slow-mo)
+  balanced720p, // 720p Smooth @ ~30fps
 }
 
 class CameraBroadcasterScreen extends StatefulWidget {
@@ -181,11 +181,13 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
   ResolutionPreset _getResolutionPreset() {
     switch (_qualityPreset) {
       case VideoQualityPreset.ultra4k1080p:
-        return ResolutionPreset.veryHigh; // 1080p / 4K full sensor resolution
+        return ResolutionPreset.veryHigh; // 1080p / 4K crisp @ 30fps
       case VideoQualityPreset.highSpeed60:
-        return ResolutionPreset.high; // 720p / 1080p high framerate
+        // 480p so the pure-Dart YUV->JPEG path can actually sustain ~60fps
+        // without the frame queue backing up (higher res = ~7fps + freeze).
+        return ResolutionPreset.medium;
       case VideoQualityPreset.balanced720p:
-        return ResolutionPreset.medium; // 480p / 720p
+        return ResolutionPreset.high; // 720p smooth @ ~30fps
     }
   }
 
@@ -211,7 +213,23 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
       );
 
       _cameraController = controller;
-      await controller.initialize();
+      try {
+        await controller.initialize();
+      } catch (e) {
+        // Some devices don't expose 60fps at the selected resolution. Fall
+        // back to the default frame rate so the camera still works rather
+        // than failing outright.
+        debugPrint('Camera init at fps:60 failed ($e); retrying at default fps');
+        await controller.dispose();
+        final fallback = CameraController(
+          description,
+          _getResolutionPreset(),
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.yuv420,
+        );
+        _cameraController = fallback;
+        await fallback.initialize();
+      }
 
       if (!mounted) return;
 

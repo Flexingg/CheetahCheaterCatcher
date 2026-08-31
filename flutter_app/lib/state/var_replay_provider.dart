@@ -49,6 +49,7 @@ class VarReplayProvider extends ChangeNotifier {
   double get playbackSpeed => _dvrManager.playbackSpeed;
   int get currentScrubIndex => _dvrManager.currentScrubIndex;
   int get totalBufferedFrames => _dvrManager.totalBufferedFrames;
+  int get captureFps => _dvrManager.captureFps;
   int get currentFps => _streamClient.currentFps;
   Uint8List? get currentFrameBytes => _dvrManager.currentFrame?.jpegBytes;
 
@@ -76,6 +77,7 @@ class VarReplayProvider extends ChangeNotifier {
       if (telemetry['torch'] != null) _isRemoteTorchOn = telemetry['torch'] as bool;
       if (telemetry['zoom'] != null) _remoteZoom = (telemetry['zoom'] as num).toDouble();
       if (telemetry['frontCamera'] != null) _isFrontCamera = telemetry['frontCamera'] as bool;
+      if (telemetry['fps'] is num) _dvrManager.setCaptureFps((telemetry['fps'] as num).toInt());
       notifyListeners();
     });
 

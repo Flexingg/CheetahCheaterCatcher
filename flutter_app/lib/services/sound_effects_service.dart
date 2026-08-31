@@ -1,3 +1,5 @@
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 enum VarSoundType {
@@ -10,74 +12,77 @@ enum VarSoundType {
 }
 
 class SoundEffectsService {
-  static void playSound(VarSoundType type) {
+  // One shared player keeps play-trigger overhead near zero; we use a single
+  // `AudioPlayer` and swap sources. `releaseMode` lets short SFX be replayed
+  // rapidly without the underlying player being torn down each time.
+  static final AudioPlayer _player = AudioPlayer()
+    ..setReleaseMode(ReleaseMode.release);
+
+  static Future<void> _playAsset(String asset, {bool haptic = false}) async {
+    try {
+      await _player.stop();
+      await _player.play(AssetSource('sounds/$asset'));
+    } catch (e) {
+      debugPrint('Audio playback failed for $asset: $e');
+    }
+    if (haptic) {
+      HapticFeedback.heavyImpact();
+    }
+  }
+
+  static Future<void> playSound(VarSoundType type) async {
     switch (type) {
       case VarSoundType.whistle:
-        playVarWhistle();
+        await playVarWhistle();
         break;
       case VarSoundType.siren:
-        playSirenAlarm();
+        await playSirenAlarm();
         break;
       case VarSoundType.buzzer:
-        playStadiumBuzzer();
+        await playStadiumBuzzer();
         break;
       case VarSoundType.chips:
-        playChipClick();
+        await playChipClick();
         break;
       case VarSoundType.victory:
-        playVictoryPodium();
+        await playVictoryPodium();
         break;
       case VarSoundType.bell:
-        playRoundBell();
+        await playRoundBell();
         break;
     }
   }
 
-  static void playChipClick() {
+  static Future<void> playChipClick() async {
+    await _playAsset('chips.wav');
     HapticFeedback.lightImpact();
   }
 
-  static void playScoreChange() {
+  static Future<void> playScoreChange() async {
     HapticFeedback.selectionClick();
   }
 
-  static void playVarWhistle() {
-    HapticFeedback.heavyImpact();
-    Future.delayed(const Duration(milliseconds: 100), () {
-      HapticFeedback.heavyImpact();
-    });
+  static Future<void> playVarWhistle() async {
+    await _playAsset('whistle.wav');
   }
 
-  static void playSirenAlarm() {
-    for (int i = 0; i < 4; i++) {
-      Future.delayed(Duration(milliseconds: i * 180), () {
-        HapticFeedback.heavyImpact();
-      });
-    }
+  static Future<void> playSirenAlarm() async {
+    await _playAsset('siren.wav');
   }
 
-  static void playStadiumBuzzer() {
-    HapticFeedback.vibrate();
+  static Future<void> playStadiumBuzzer() async {
+    await _playAsset('buzzer.wav', haptic: true);
   }
 
-  static void playRoundBell() {
-    HapticFeedback.mediumImpact();
-    Future.delayed(const Duration(milliseconds: 120), () {
-      HapticFeedback.lightImpact();
-    });
+  static Future<void> playRoundBell() async {
+    await _playAsset('bell.wav');
   }
 
-  static void playVictoryPodium() {
-    HapticFeedback.mediumImpact();
-    Future.delayed(const Duration(milliseconds: 150), () {
-      HapticFeedback.heavyImpact();
-    });
-    Future.delayed(const Duration(milliseconds: 300), () {
-      HapticFeedback.heavyImpact();
-    });
+  static Future<void> playVictoryPodium() async {
+    await _playAsset('victory.wav');
   }
 
-  static void playTelestratorStroke() {
+  static Future<void> playTelestratorStroke() async {
     HapticFeedback.selectionClick();
   }
 }

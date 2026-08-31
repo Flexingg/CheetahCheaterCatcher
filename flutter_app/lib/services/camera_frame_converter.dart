@@ -40,7 +40,9 @@ class CameraFrameConverter {
     }
   }
 
-  /// High-accuracy, fast Android YUV420 to RGB conversion with single-pass rotation (0ms extra cost)
+  /// High-accuracy, fast Android YUV420 to RGB conversion with single-pass rotation (0ms extra cost).
+  /// Optimized: writes into a packed RGB byte buffer (no per-pixel method calls) so it runs many
+  /// times faster and produces far less garbage than the old per-pixel `setPixelRgb` loop.
   static img.Image _convertYUV420SinglePass(
     CameraImage image, {
     int strideStep = 1,
@@ -56,8 +58,6 @@ class CameraFrameConverter {
     final int outW = isRotated ? height : width;
     final int outH = isRotated ? width : height;
 
-    final img.Image rgbImage = img.Image(width: outW, height: outH);
-
     final yPlane = image.planes[0];
     final uPlane = image.planes[1];
     final vPlane = image.planes[2];
@@ -68,12 +68,18 @@ class CameraFrameConverter {
 
     final int yRowStride = yPlane.bytesPerRow;
     final int yPixelStride = yPlane.bytesPerPixel ?? 1;
-
     final int uRowStride = uPlane.bytesPerRow;
     final int uPixelStride = uPlane.bytesPerPixel ?? 1;
-
     final int vRowStride = vPlane.bytesPerRow;
     final int vPixelStride = vPlane.bytesPerPixel ?? 1;
+
+    final Uint8List rgb = Uint8List(outW * outH * 3);
+    final int yBytesLen = yBytes.length;
+    final int uBytesLen = uBytes.length;
+    final int vBytesLen = vBytes.length;
+
+    final bool rot90 = rotationAngle == 90;
+    final bool rot180 = rotationAngle == 180;
 
     for (int inY = 0; inY < height; inY++) {
       final int actualY = inY * strideStep;
@@ -90,7 +96,7 @@ class CameraFrameConverter {
         final int uIndex = uRowOffset + (uvw * uPixelStride);
         final int vIndex = vRowOffset + (uvw * vPixelStride);
 
-        if (yIndex >= yBytes.length || uIndex >= uBytes.length || vIndex >= vBytes.length) {
+        if (yIndex >= yBytesLen || uIndex >= uBytesLen || vIndex >= vBytesLen) {
           continue;
         }
 
@@ -98,34 +104,41 @@ class CameraFrameConverter {
         final int u = uBytes[uIndex] - 128;
         final int v = vBytes[vIndex] - 128;
 
-        // Accurate integer BT.601 full-range calculation
         final int r = (y + ((359 * v) >> 8)).clamp(0, 255);
         final int g = (y - ((88 * u + 183 * v) >> 8)).clamp(0, 255);
         final int b = (y + ((454 * u) >> 8)).clamp(0, 255);
 
-        // Compute rotated target coordinates in single pass
-        int targetX;
-        int targetY;
-
-        if (rotationAngle == 90) {
+        // Rotated target coordinates in single pass
+        final int targetX;
+        final int targetY;
+        if (rot90) {
           targetX = height - 1 - inY;
           targetY = inX;
+        } else if (rot180) {
+          targetX = width - 1 - inX;
+          targetY = height - 1 - inY;
         } else if (rotationAngle == 270) {
           targetX = inY;
           targetY = width - 1 - inX;
-        } else if (rotationAngle == 180) {
-          targetX = width - 1 - inX;
-          targetY = height - 1 - inY;
         } else {
           targetX = inX;
           targetY = inY;
         }
 
-        rgbImage.setPixelRgb(targetX, targetY, r, g, b);
+        final int o = (targetY * outW + targetX) * 3;
+        rgb[o] = r;
+        rgb[o + 1] = g;
+        rgb[o + 2] = b;
       }
     }
 
-    return rgbImage;
+    return img.Image.fromBytes(
+      width: outW,
+      height: outH,
+      bytes: rgb.buffer,
+      numChannels: 3,
+      order: img.ChannelOrder.rgb,
+    );
   }
 
   /// Fast iOS BGRA8888 single-pass conversion
