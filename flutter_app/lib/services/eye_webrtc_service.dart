@@ -310,14 +310,19 @@ class EyeWebRtcService {
     switch (action) {
       case 'torch':
         _setTorch(value == true);
+        break;
       case 'zoom':
         if (value is num) _setZoom(value.toDouble());
+        break;
       case 'flip_camera':
         _flipCamera();
+        break;
       case 'quality_preset':
         if (value is String) setQualityPreset(value);
+        break;
       case 'sound_alert':
         if (value is String) onSoundAlert?.call(value);
+        break;
       default:
         break;
     }

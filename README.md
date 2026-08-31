@@ -1,6 +1,6 @@
 <div align="center">
 
-[![Direct Android APK Download](https://img.shields.io/badge/⬇️%20ANDROID%20APK-v1.0.4%20Release-FFB300?style=for-the-badge&logo=android&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.4.apk)
+[![Direct Android APK Download](https://img.shields.io/badge/⬇️%20ANDROID%20APK-v1.0.5%20Release-FFB300?style=for-the-badge&logo=android&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/releases/download/v1.0.5/JokarzPlays-v1.0.5.apk)
 [![Direct Windows App Download](https://img.shields.io/badge/⬇️%20WINDOWS%20APP-v1.0.4%20Release-00E676?style=for-the-badge&logo=windows&logoColor=black)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-Windows-v1.0.4.zip)
 
 [![Flutter](https://img.shields.io/badge/Flutter-3.32+-02569B?logo=flutter&logoColor=white)](https://flutter.dev)
@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/License-MIT-FFB300.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v1.0.4-FF3366.svg)](https://github.com/Flexingg/CheetahCheaterCatcher/releases/tag/v1.0.4)
 
-### 📥 **[Download Android APK (v1.0.4)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-v1.0.4.apk)** | **[Download Windows App (v1.0.4 .zip)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-Windows-v1.0.4.zip)**
+### 📥 **[Download Android APK (v1.0.5)](https://github.com/Flexingg/CheetahCheaterCatcher/releases/download/v1.0.5/JokarzPlays-v1.0.5.apk)** | **[Download Windows App (v1.0.4 .zip)](https://github.com/Flexingg/CheetahCheaterCatcher/raw/main/releases/JokarzPlays-Windows-v1.0.4.zip)**
 
 *The ultimate dual-mode Video Assistant Referee (VAR), instant replay DVR, telestrator drawing suite, quick-type matrix scoreboard, and lifetime trophy room for game nights, poker tables, card tournaments, and board game enthusiasts.*
 
