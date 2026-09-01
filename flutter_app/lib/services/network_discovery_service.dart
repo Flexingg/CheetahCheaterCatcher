@@ -36,10 +36,9 @@ class NetworkDiscoveryService {
       );
       _broadcasterSocket?.broadcastEnabled = true;
 
-      _broadcastTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) async {
+      _broadcastTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) async {
         final localIps = await getLocalIpAddresses();
         final ip = localIps.isNotEmpty ? localIps.first : '127.0.0.1';
-
         final payload = jsonEncode({
           'sig': AppConstants.discoverySignature,
           'deviceName': deviceName,
@@ -50,14 +49,27 @@ class NetworkDiscoveryService {
         });
 
         final data = utf8.encode(payload);
-        try {
-          _broadcasterSocket?.send(
-            data,
-            InternetAddress('255.255.255.255'),
-            AppConstants.discoveryPort,
-          );
-        } catch (e) {
-          debugPrint('Discovery broadcast send error: $e');
+
+        // Broadcast to the subnet-directed address of every local interface
+        // (e.g. 192.168.1.255) in addition to the limited broadcast, because
+        // many routers/APs silently drop 255.255.255.255.
+        final targets = <InternetAddress>{InternetAddress('255.255.255.255')};
+        for (final localIp in localIps) {
+          final parts = localIp.split('.');
+          if (parts.length == 4) {
+            parts[3] = '255';
+            try {
+              targets.add(InternetAddress(parts.join('.')));
+            } catch (_) {}
+          }
+        }
+
+        for (final target in targets) {
+          try {
+            _broadcasterSocket?.send(data, target, AppConstants.discoveryPort);
+          } catch (e) {
+            debugPrint('Discovery broadcast to $target error: $e');
+          }
         }
       });
     } catch (e) {

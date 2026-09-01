@@ -12,19 +12,23 @@ enum VarSoundType {
 }
 
 class SoundEffectsService {
-  // One shared player keeps play-trigger overhead near zero; we use a single
-  // `AudioPlayer` and swap sources. `releaseMode` lets short SFX be replayed
-  // rapidly without the underlying player being torn down each time.
-  static final AudioPlayer _player = AudioPlayer()
-    ..setReleaseMode(ReleaseMode.release);
-
+  // A fresh AudioPlayer per trigger: reusing one player with stop->play can
+  // fail to switch sources (so every pad sounded the same). Each player is
+  // disposed after it finishes playing.
   static Future<void> _playAsset(String asset, {bool haptic = false}) async {
+    final player = AudioPlayer();
     try {
-      await _player.stop();
-      await _player.play(AssetSource('sounds/$asset'));
+      await player.setSource(AssetSource('sounds/$asset'));
+      await player.resume();
     } catch (e) {
       debugPrint('Audio playback failed for $asset: $e');
+      await player.dispose();
+      return;
     }
+    // Free the native player once playback completes.
+    player.onPlayerComplete.first.then((_) => player.dispose());
+    // Safety net so we never leak if completion never fires (dispose is idempotent).
+    Future.delayed(const Duration(seconds: 6), () => player.dispose());
     if (haptic) {
       HapticFeedback.heavyImpact();
     }

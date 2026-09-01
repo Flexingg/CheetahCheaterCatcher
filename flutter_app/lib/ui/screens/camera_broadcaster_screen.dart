@@ -104,10 +104,25 @@ class _CameraBroadcasterScreenState extends State<CameraBroadcasterScreen> with 
           }
         }
         if (action == 'sound_alert') {
-          SoundEffectsService.playVarWhistle();
+          // Honor the sound type the remote Table requested (e.g. 'siren',
+          // 'buzzer', ...) instead of always playing the whistle.
+          final typeName = value is String ? value : 'whistle';
+          final type = VarSoundType.values
+              .where((t) => t.name == typeName)
+              .firstOrNull;
+          final soundType = type ?? VarSoundType.whistle;
+          SoundEffectsService.playSound(soundType);
+          final emoji = switch (soundType) {
+            VarSoundType.whistle => '⚽',
+            VarSoundType.siren => '🚨',
+            VarSoundType.buzzer => '📢',
+            VarSoundType.chips => '🎰',
+            VarSoundType.bell => '🔔',
+            VarSoundType.victory => '👑',
+          };
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('🚨 REMOTE VAR REFEREE WHISTLE TRIGGERED!'),
+            SnackBar(
+              content: Text('$emoji REMOTE VAR REFEREE ${soundType.name.toUpperCase()} TRIGGERED!'),
               backgroundColor: JokarzColors.crimsonDark,
               duration: Duration(seconds: 2),
             ),
